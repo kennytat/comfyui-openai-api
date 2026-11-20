@@ -7,8 +7,8 @@
       "cfg": 6.5,
       "sampler_name": "dpmpp_2m",
       "scheduler": "karras",
-      "denoise": 0.9,
-      "model": ["4", 0],
+      "denoise": 1.0,
+      "model": ["15", 0],
       "positive": ["6", 0],
       "negative": ["7", 0],
       "latent_image": ["12", 0]
@@ -50,7 +50,7 @@
     "class_type": "SaveImage",
     "inputs": {
       "filename_prefix": "openai-api/check",
-      "images": ["8", 0]
+      "images": ["17", 0]
     },
     "_meta": {"title": "Save Image"}
   },
@@ -83,7 +83,7 @@
       "image": "example.png",
       "channel": "alpha"
     },
-    "_meta": {"title": "Load Mask (alpha: transparent = edit)"}
+    "_meta": {"title": "Load Mask (alpha: transparent = edit; feathered by the gateway)"}
   },
   "14": {
     "class_type": "SetLatentNoiseMask",
@@ -92,5 +92,32 @@
       "mask": ["13", 0]
     },
     "_meta": {"title": "Set Latent Noise Mask"}
+  },
+  "15": {
+    "class_type": "DifferentialDiffusion",
+    "inputs": {
+      "model": ["4", 0],
+      "strength": 1.0
+    },
+    "_meta": {"title": "Differential Diffusion (soft mask -> gradual denoise)"}
+  },
+  "16": {
+    "class_type": "InvertMask",
+    "inputs": {
+      "mask": ["13", 0]
+    },
+    "_meta": {"title": "Invert Mask (1 = keep original)"}
+  },
+  "17": {
+    "class_type": "ImageCompositeMasked",
+    "inputs": {
+      "destination": ["8", 0],
+      "source": ["10", 0],
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "mask": ["16", 0]
+    },
+    "_meta": {"title": "Composite original back outside the mask (batch-safe: source repeats to n)"}
   }
 }

@@ -135,7 +135,7 @@ async def test_edit_with_mask_graph_and_alpha(gw):
     (noise,) = nodes(graph, "SetLatentNoiseMask")
     mask_id = next(k for k, v in graph.items() if v["class_type"] == "LoadImageMask")
     assert noise["mask"] == [mask_id, 0]
-    assert nodes(graph, "KSampler")[0]["denoise"] == 0.9
+    assert nodes(graph, "KSampler")[0]["denoise"] == 1.0
     names = [u["filename"] for u in gw.fake.uploads]
     assert names[0].endswith("_image.png") and names[1].endswith("_mask.png")
     assert names[0].split("_")[0] == names[1].split("_")[0]  # same job id
@@ -144,6 +144,7 @@ async def test_edit_with_mask_graph_and_alpha(gw):
     alpha = mask.getchannel("A")
     assert alpha.getpixel((512, 512)) == 0  # transparent = edit area preserved
     assert alpha.getpixel((5, 5)) == 255 and alpha.getpixel((1018, 1018)) == 255
+    assert 0 < alpha.getpixel((256, 512)) < 255  # feathered edge of the 256..768 hole
     assert input_files(gw.fake) == []
 
 
@@ -229,7 +230,7 @@ async def test_job_log_line(gw, caplog):
     r = await gw.edit(mask=make_mask())
     assert r.status_code == 200
     record = json.loads(caplog.records[-1].getMessage())
-    assert record["operation"] == "edit_masked" and record["denoise"] == 0.9
+    assert record["operation"] == "edit_masked" and record["denoise"] == 1.0
     assert record["inputs_deleted"] == 2 and record["outcome"] == "ok"
     assert "upload_ms" in record and "prompt" not in record
 

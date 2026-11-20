@@ -4,23 +4,52 @@ An OpenAI-compatible Images API in front of a local ComfyUI:
 
 | Endpoint | Body | ComfyUI workflow |
 |---|---|---|
-| `POST /v1/images/generations` | JSON | `sdxl.json` (txt2img) |
-| `POST /v1/images/edits` | multipart: `image` (or one `image[]`), `prompt`, optional `mask` | `sdxl_img2img.json`, with a mask `sdxl_inpaint.json` |
-| `POST /v1/images/variations` | multipart: `image` | `sdxl_img2img.json` (empty prompt) |
+| `POST /v1/images/generations` | JSON | `<model>.json` (txt2img, e.g. `sdxl.json`) |
+| `POST /v1/images/edits` | multipart: `image` (or one `image[]`), `prompt`, optional `mask` | `<model>_img2img.json`, with a mask `<model>_inpaint.json` |
+| `POST /v1/images/variations` | multipart: `image` | `<model>_img2img.json` (empty prompt) |
 | `GET /v1/models`, `GET /v1/models/{id}` | - | - |
 
  The official OpenAI SDKs talk to your own GPU box through a small FastAPI gateway.
+
+## Models
+
+| `model` | Operations | Native sizes (`size`) | OpenAI size aliases | Steps (`quality`) | Typical latency, RTX 3060 12 GB (warm / first request after another model) |
+|---|---|---|---|---|---|
+| `sdxl` (default) | generate, edit, masked edit, variation | 1024x1024, 1152x896, 896x1152, 1216x832, 832x1216, 1344x768, 768x1344, 1536x640, 640x1536 | 1792x1024 -> 1344x768, 1024x1792 -> 768x1344, 1536x1024 -> 1216x832, 1024x1536 -> 832x1216 | low 15, standard/medium/auto 25, hd/high 35 | 1024x1024 25 steps ~19 s (`n=4` ~41 s) / +~20 s |
+| `sd15` | generate, edit, masked edit, variation | 512x512 (default), 640x640, 768x512, 512x768, 768x576, 576x768, 896x512, 512x896 | 1024x1024 and 256x256 -> 512x512, 1536x1024 -> 768x512, 1024x1536 -> 512x768, 1792x1024 -> 896x512, 1024x1792 -> 512x896 | low 15, standard/medium/auto 25, hd/high 35 | 512x512 25 steps ~3 s (`n=4` ~12 s), edits ~3.5 s / +~7 s |
+| `flux-schnell` | generate, edit, masked edit, variation | same as `sdxl` | same as `sdxl` | always 4 | 1024x1024 ~13-14 s (`n=4` ~46-50 s), edits ~14 s / +~38 s (cold `n=4` ~80 s) |
+
+- Files: `./scripts/download-models.sh sdxl sd15 flux-schnell` (`scripts/models.manifest`, sha256-verified).
+  `sd15` is `v1-5-pruned-emaonly-fp16.safetensors` (2.1 GB); `flux-schnell` is the all-in-one
+  `flux1-schnell-fp8.safetensors` checkpoint (17.2 GB: fp8 diffusion model, CLIP-L, T5-XXL fp8 and
+  VAE, loaded with `CheckpointLoaderSimple`). `GET /v1/models` lists every enabled model whose files
+  ComfyUI reports.
+- **SD 1.5 sizes:** SD 1.5 was trained at 512 px and duplicates subjects above ~0.45 MP, so its
+  buckets stay between 0.25 and 0.46 MP (multiples of 64). OpenAI's square sizes (1024x1024 and
+  dall-e-2's 256x256) map to 512x512 and the wide/tall ones to the closest aspect ratio; the
+  response `size` reports the real size. Upscale on the client if you need 1024 px.
+- **Flux schnell:** distilled for 4 steps at cfg 1.0 (`euler`/`simple`, `EmptySD3LatentImage`), so
+  `quality` does not change the step count, and `negative_prompt` and `cfg_scale` are **accepted but
+  ignored** (cfg 1.0 disables the negative branch; rejecting them would break clients that always
+  send them). An explicit `steps` still applies. No `FluxGuidance` node: schnell has no guidance
+  embedding. The fp8 weights (~11.3 GB) plus T5 do not fit in 12 GB VRAM together; ComfyUI stages
+  them with dynamic VRAM loading (peak 11.9 GB VRAM, ~19 GB host RAM for the ComfyUI process).
+- **Switching models** is a full cold load each time: ComfyUI unloads the previous checkpoint itself
+  (no `POST /free` needed), and the gateway adds the model's `cold_load_s` to the estimate when the
+  checkpoint changes. A cold `flux-schnell` `n=4` request (~80 s measured) is only admitted on an
+  idle queue because its warm estimate fits; it runs close to the 90 s deadline, so prefer `n<=2`
+  right after a model switch.
 
 ## Setup (in this order)
 
 1. `cp .env.example .env`, then set `API_KEYS` (e.g. `openssl rand -hex 32`), `PUBLIC_BASE_URL`
    (https, no trailing slash; only needed for `response_format=url`) and `HF_TOKEN`.
-2. `./scripts/download-models.sh sdxl` - **the one manual step, run it before the first
+2. `./scripts/download-models.sh sdxl` (add `sd15 flux-schnell` for the other models) - **the one manual step, run it before the first
    `docker compose up`.** It creates every storage directory the stack mounts (otherwise Docker
    creates them root-owned and later script runs need `sudo`) and downloads the SDXL checkpoint.
    Re-running is a no-op. Run it without arguments to fetch every entry in
-   `scripts/models.manifest` (includes the optional fp16-fix VAE). Entries with sha256 `-` are
-   not hash-verified.
+   `scripts/models.manifest` (includes the optional fp16-fix VAE). Every entry carries Hugging
+   Face's LFS sha256 (`x-linked-etag`), so files are verified and re-downloaded on mismatch.
 3. `docker compose up -d --build`. The first ComfyUI boot can take several minutes. The gateway
    starts immediately and answers `/healthz`; `/readyz` and `/v1/models` return 503 until ComfyUI
    is up. `docker compose ps` shows ComfyUI as healthy once booted (visibility only).
@@ -142,15 +171,24 @@ r = client.images.create_variation(model="sdxl", image=open("fox.png", "rb"), n=
   `m = Image.new("RGBA", img.size, (0, 0, 0, 255)); m.paste((0, 0, 0, 0), box); m.save("mask.png")`.
   A mask without alpha, or not a PNG, is 400 (`param=mask`). A mask of a different size is
   resized to the image first.
+- **Mask feathering / blending:** the gateway Gaussian-blurs the mask's alpha (sigma = 2% of
+  the short side, `MASK_FEATHER_FRACTION` in `gateway/app/uploads.py`: ~20 px at 1024, ~10 px
+  at 512), so the soft edge straddles the mask boundary. The inpaint workflows denoise through
+  that soft mask (SDXL/SD1.5 additionally use `DifferentialDiffusion`; flux-schnell uses a
+  constant `ModelSamplingFlux` shift so its default strength 0.8 starts near full noise but
+  still sees the surroundings) and then paste the decoded result onto the original through the
+  same mask (`ImageCompositeMasked`). Pixels outside the feathered edge are returned
+  bit-identical to the (resized) input; the repainted area fades into the scene instead of
+  showing a hard box. A fully transparent mask edits everything.
 - **Inputs:** `image` must be PNG, JPEG or WEBP, at most `MAX_UPLOAD_BYTES` (413 otherwise) and
   `MAX_INPUT_PIXELS`. It is EXIF-rotated, transparency is flattened onto gray, and it is
-  cover-resized and center-cropped to the requested `size` (default: model default `1024x1024`,
+  cover-resized and center-cropped to the requested `size` (default: the model's default size,
   same whitelist and aliases as generations; the mask gets the identical transform). Only one
   image is accepted: more than one `image`/`image[]` is 400 `unsupported_value`. Without a mask
   the edit is plain img2img (the image's own alpha is not used as a mask).
 - **Fields:** edits take `prompt` (required), `model`, `n`, `size`, `response_format`, `quality`,
   `output_format`, `output_compression`; variations take `model`, `n`, `size`, `response_format`.
-  Extensions: `seed`, `strength` (denoise 0.05..1.0; defaults: edit 0.7, masked edit 0.9,
+  Extensions: `seed`, `strength` (denoise 0.05..1.0; defaults: edit 0.7, masked edit 1.0 (flux-schnell 0.8),
   variation 0.55), plus `negative_prompt`, `steps`, `cfg_scale` as for generations. `stream`,
   `partial_images > 0` and `background=transparent` are 400 like generations.
 - Uploads go to ComfyUI as `input/openai-api/<job_id>_image.png` / `<job_id>_mask.png` and are
@@ -240,8 +278,12 @@ cancel the ComfyUI job first.
   `cold_load_s: 20`), so estimates sit at or slightly above real times. With the 80 s generation
   budget, `n=4` at `quality=hd` (35 steps) is rejected up front with 400 `request_too_expensive`,
   and only one heavy `n=4` job is queued at a time (others get an immediate 429).
+- `sd15` (`est_seconds_per_step: 0.45`, `cold_load_s: 8`) and `flux-schnell` (`3.2`, `40`, edit
+  `est_factor` 1.0) were calibrated the same way (Phase 3, `evidence/phase3/`); their warm estimates
+  sit 1-20% above measured times (small `sd15` jobs more, because of the fixed 3 s job overhead).
 - Re-calibrate after changing GPU, model or ComfyUI flags: run `tests/smoke/smoke_openai_sdk.py`
-  (and `tests/smoke/smoke_phase2.py SOURCE.png OUT_DIR` for edits/variations) and compare
+  (`tests/smoke/smoke_phase2.py SOURCE.png OUT_DIR` for SDXL edits/variations,
+  `tests/smoke/smoke_phase3.py MODEL ALIAS_SIZE OUT_DIR` for any model) and compare
   `est_job_s` with `gpu_ms` in the gateway's per-job log lines. Edit/variation operations carry
   their own `est_factor` (0.9) and `est_extra_s` (0.5) in `registry.json` `operations`.
 - Host port: the gateway listens on `127.0.0.1:${GATEWAY_PORT:-8001}` (8000 is often taken).

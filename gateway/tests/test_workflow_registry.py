@@ -51,10 +51,10 @@ def _edit_registry(directory: Path, mutate) -> None:
 
 
 def test_load_builtin_registry(registry, sdxl):
-    assert len(registry) == 1
     assert "sdxl" in registry
     assert registry.get("nope") is None
-    assert [m.id for m in registry.enabled()] == ["sdxl"]
+    assert [m.id for m in registry.models][0] == "sdxl"
+    assert len(registry) == len(registry.models)
     assert sdxl.output_node == "9"
     assert sdxl.checkpoint == "sd_xl_base_1.0.safetensors"
     assert sdxl.required_files[0].loader == "CheckpointLoaderSimple"
@@ -239,7 +239,7 @@ def test_build_prompt_img2img(sdxl):
         _params(operation="edit_masked", image="openai-api/a.png", mask="openai-api/m.png"),
     )
     assert masked["13"]["inputs"] == {"image": "openai-api/m.png", "channel": "alpha"}
-    assert masked["3"]["inputs"]["denoise"] == 0.9  # operation default
+    assert masked["3"]["inputs"]["denoise"] == 1.0  # operation default
     assert masked["14"]["inputs"] == {"samples": ["11", 0], "mask": ["13", 0]}
 
 

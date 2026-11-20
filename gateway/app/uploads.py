@@ -13,10 +13,13 @@ draft-decoded at a reduced scale no smaller than twice the target), applies EXIF
 orientation (image and mask), flattens transparency onto neutral gray, converts to RGB and
 cover-resizes/center-crops to ``width x height``. The optional mask must be a PNG with an
 alpha channel (OpenAI convention: fully transparent = area to edit); its alpha is resized
-to the image's size if they differ, then cropped with the identical transform, and saved
-as an RGBA PNG whose alpha ComfyUI's ``LoadImageMask(channel="alpha")`` turns into the
-inpaint mask (it inverts alpha, so transparent -> 1 -> repainted). Output PNGs carry no
-metadata. Any Pillow failure while transposing/converting/resizing is a 400
+to the image's size if they differ, then cropped with the identical transform, then
+feathered with a Gaussian blur (sigma = ``MASK_FEATHER_FRACTION`` of the short side; the
+soft edge straddles the original mask boundary, fully opaque areas far from it stay
+untouched), and saved as an RGBA PNG whose alpha ComfyUI's
+``LoadImageMask(channel="alpha")`` turns into the inpaint mask (it inverts alpha, so
+transparent -> 1 -> repainted). Output PNGs carry no metadata. Any Pillow failure while
+transposing/converting/resizing is a 400
 ``invalid_image`` for the offending parameter.
 
 ``configure_pillow(max_pixels)``: set once at startup (process-global): Pillow's own
@@ -35,7 +38,7 @@ import io
 import warnings
 from collections.abc import AsyncIterator, Callable
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 from starlette.datastructures import Headers, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import Request
@@ -47,6 +50,10 @@ MAX_FIELD_BYTES = 128 * 1024  # text fields (prompt <= 32000 chars of UTF-8)
 MAX_FILES = 4
 MAX_FIELDS = 64
 FLATTEN_COLOR = (128, 128, 128)
+# Mask feathering: Gaussian sigma as a fraction of the target's short side (~20 px at 1024,
+# ~10 px at 512). The inpaint workflows use the soft mask for differential denoising and to
+# composite the result back onto the original, so the seam blends instead of showing a box.
+MASK_FEATHER_FRACTION = 0.02
 
 
 class _FileTooLarge(Exception):
@@ -234,6 +241,8 @@ def prepare_inputs(
             return ImageOps.fit(a, target, Image.Resampling.BILINEAR)
 
         alpha = _processing("mask", _fit_alpha)
+        sigma = MASK_FEATHER_FRACTION * min(width, height)
+        alpha = _processing("mask", lambda: alpha.filter(ImageFilter.GaussianBlur(sigma)))
         black = Image.new("L", target, 0)
         mask_png = _png(Image.merge("RGBA", (black, black, black, alpha)))
     return image_png, mask_png

@@ -93,7 +93,7 @@
           },
           "output_node": "9",
           "defaults": {
-            "denoise": 0.9
+            "denoise": 1.0
           },
           "est_factor": 0.9,
           "est_extra_s": 0.5
@@ -117,6 +117,239 @@
             "prompt": ""
           },
           "est_factor": 0.9,
+          "est_extra_s": 0.5
+        }
+      }
+    },
+    {
+      "id": "sd15",
+      "workflow": "sd15.json",
+      "enabled": true,
+      "required_files": [
+        {
+          "loader": "CheckpointLoaderSimple",
+          "input": "ckpt_name",
+          "value": "v1-5-pruned-emaonly-fp16.safetensors"
+        }
+      ],
+      "bindings": {
+        "prompt": ["6", "text"],
+        "negative_prompt": ["7", "text"],
+        "width": ["5", "width"],
+        "height": ["5", "height"],
+        "n": ["5", "batch_size"],
+        "seed": ["3", "seed"],
+        "steps": ["3", "steps"],
+        "cfg_scale": ["3", "cfg"],
+        "filename_prefix": ["9", "filename_prefix"]
+      },
+      "output_node": "9",
+      "default_size": "512x512",
+      "sizes": [
+        "512x512",
+        "640x640",
+        "768x512",
+        "512x768",
+        "768x576",
+        "576x768",
+        "896x512",
+        "512x896"
+      ],
+      "size_aliases": {
+        "256x256": "512x512",
+        "1024x1024": "512x512",
+        "1792x1024": "896x512",
+        "1024x1792": "512x896",
+        "1536x1024": "768x512",
+        "1024x1536": "512x768"
+      },
+      "quality_steps": {
+        "low": 15,
+        "standard": 25,
+        "medium": 25,
+        "auto": 25,
+        "hd": 35,
+        "high": 35
+      },
+      "defaults": {
+        "negative_prompt": "",
+        "cfg_scale": 7.0,
+        "steps": 25
+      },
+      "est_seconds_per_step": 0.45,
+      "cold_load_s": 8,
+      "operations": {
+        "edit": {
+          "workflow": "sd15_img2img.json",
+          "bindings": {
+            "prompt": ["6", "text"],
+            "negative_prompt": ["7", "text"],
+            "n": ["12", "amount"],
+            "seed": ["3", "seed"],
+            "steps": ["3", "steps"],
+            "cfg_scale": ["3", "cfg"],
+            "denoise": ["3", "denoise"],
+            "image": ["10", "image"],
+            "filename_prefix": ["9", "filename_prefix"]
+          },
+          "output_node": "9",
+          "defaults": {
+            "denoise": 0.7
+          },
+          "est_factor": 0.9,
+          "est_extra_s": 0.5
+        },
+        "edit_masked": {
+          "workflow": "sd15_inpaint.json",
+          "bindings": {
+            "prompt": ["6", "text"],
+            "negative_prompt": ["7", "text"],
+            "n": ["12", "amount"],
+            "seed": ["3", "seed"],
+            "steps": ["3", "steps"],
+            "cfg_scale": ["3", "cfg"],
+            "denoise": ["3", "denoise"],
+            "image": ["10", "image"],
+            "filename_prefix": ["9", "filename_prefix"],
+            "mask": ["13", "image"]
+          },
+          "output_node": "9",
+          "defaults": {
+            "denoise": 1.0
+          },
+          "est_factor": 0.9,
+          "est_extra_s": 0.5
+        },
+        "variation": {
+          "workflow": "sd15_img2img.json",
+          "bindings": {
+            "prompt": ["6", "text"],
+            "negative_prompt": ["7", "text"],
+            "n": ["12", "amount"],
+            "seed": ["3", "seed"],
+            "steps": ["3", "steps"],
+            "cfg_scale": ["3", "cfg"],
+            "denoise": ["3", "denoise"],
+            "image": ["10", "image"],
+            "filename_prefix": ["9", "filename_prefix"]
+          },
+          "output_node": "9",
+          "defaults": {
+            "denoise": 0.55,
+            "prompt": ""
+          },
+          "est_factor": 0.9,
+          "est_extra_s": 0.5
+        }
+      }
+    },
+    {
+      "id": "flux-schnell",
+      "workflow": "flux-schnell.json",
+      "enabled": true,
+      "required_files": [
+        {
+          "loader": "CheckpointLoaderSimple",
+          "input": "ckpt_name",
+          "value": "flux1-schnell-fp8.safetensors"
+        }
+      ],
+      "bindings": {
+        "prompt": ["6", "text"],
+        "width": ["5", "width"],
+        "height": ["5", "height"],
+        "n": ["5", "batch_size"],
+        "seed": ["3", "seed"],
+        "steps": ["3", "steps"],
+        "filename_prefix": ["9", "filename_prefix"]
+      },
+      "output_node": "9",
+      "default_size": "1024x1024",
+      "sizes": [
+        "1024x1024",
+        "1152x896",
+        "896x1152",
+        "1216x832",
+        "832x1216",
+        "1344x768",
+        "768x1344",
+        "1536x640",
+        "640x1536"
+      ],
+      "size_aliases": {
+        "1792x1024": "1344x768",
+        "1024x1792": "768x1344",
+        "1536x1024": "1216x832",
+        "1024x1536": "832x1216"
+      },
+      "quality_steps": {
+        "low": 4,
+        "standard": 4,
+        "medium": 4,
+        "auto": 4,
+        "hd": 4,
+        "high": 4
+      },
+      "defaults": {
+        "steps": 4
+      },
+      "est_seconds_per_step": 3.2,
+      "cold_load_s": 40,
+      "operations": {
+        "edit": {
+          "workflow": "flux-schnell_img2img.json",
+          "bindings": {
+            "prompt": ["6", "text"],
+            "n": ["12", "amount"],
+            "seed": ["3", "seed"],
+            "steps": ["3", "steps"],
+            "denoise": ["3", "denoise"],
+            "image": ["10", "image"],
+            "filename_prefix": ["9", "filename_prefix"]
+          },
+          "output_node": "9",
+          "defaults": {
+            "denoise": 0.7
+          },
+          "est_factor": 1.0,
+          "est_extra_s": 0.5
+        },
+        "edit_masked": {
+          "workflow": "flux-schnell_inpaint.json",
+          "bindings": {
+            "prompt": ["6", "text"],
+            "n": ["12", "amount"],
+            "seed": ["3", "seed"],
+            "steps": ["3", "steps"],
+            "denoise": ["3", "denoise"],
+            "image": ["10", "image"],
+            "filename_prefix": ["9", "filename_prefix"],
+            "mask": ["13", "image"]
+          },
+          "output_node": "9",
+          "defaults": {
+            "denoise": 0.8
+          },
+          "est_factor": 1.0,
+          "est_extra_s": 0.5
+        },
+        "variation": {
+          "workflow": "flux-schnell_img2img.json",
+          "bindings": {
+            "prompt": ["6", "text"],
+            "n": ["12", "amount"],
+            "seed": ["3", "seed"],
+            "steps": ["3", "steps"],
+            "denoise": ["3", "denoise"],
+            "image": ["10", "image"],
+            "filename_prefix": ["9", "filename_prefix"]
+          },
+          "output_node": "9",
+          "defaults": {
+            "denoise": 0.55,
+            "prompt": ""
+          },
+          "est_factor": 1.0,
           "est_extra_s": 0.5
         }
       }

@@ -1,5 +1,8 @@
 # model_id  hf_repo  hf_file  dest_relpath  sha256
 # sha256 "-" means: skip verification (an existing file is treated as present).
 # Fill in a real hash to enable verification and re-download on mismatch.
-sdxl      stabilityai/stable-diffusion-xl-base-1.0  sd_xl_base_1.0.safetensors      comfyui/storage-models/models/checkpoints/sd_xl_base_1.0.safetensors  -
-sdxl-vae  madebyollin/sdxl-vae-fp16-fix             sdxl_vae.safetensors            comfyui/storage-models/models/vae/sdxl_vae_fp16_fix.safetensors       -
+# Hashes are Hugging Face's LFS sha256 (the `x-linked-etag` header of a HEAD on the resolve URL).
+sdxl          stabilityai/stable-diffusion-xl-base-1.0  sd_xl_base_1.0.safetensors            comfyui/storage-models/models/checkpoints/sd_xl_base_1.0.safetensors            31e35c80fc4829d14f90153f4c74cd59c90b779f6afe05a74cd6120b893f7e5b
+sdxl-vae      madebyollin/sdxl-vae-fp16-fix             sdxl_vae.safetensors                  comfyui/storage-models/models/vae/sdxl_vae_fp16_fix.safetensors                 235745af8d86bf4a4c1b5b4f529868b37019a10f7c0b2e79ad0abca3a22bc6e1
+sd15          Comfy-Org/stable-diffusion-v1-5-archive   v1-5-pruned-emaonly-fp16.safetensors  comfyui/storage-models/models/checkpoints/v1-5-pruned-emaonly-fp16.safetensors  e9476a13728cd75d8279f6ec8bad753a66a1957ca375a1464dc63b37db6e3916
+flux-schnell  Comfy-Org/flux1-schnell                   flux1-schnell-fp8.safetensors         comfyui/storage-models/models/checkpoints/flux1-schnell-fp8.safetensors         ead426278b49030e9da5df862994f25ce94ab2ee4df38b556ddddb3db093bf72

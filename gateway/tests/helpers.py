@@ -13,8 +13,9 @@ set to the submitting client id until it completes, so held jobs are never "lost
 head prompt completes on its next ``/history`` poll unless ``hold`` (an ``asyncio.Event``)
 is set and not yet triggered. Outputs are 64x64-or-requested-size PNGs carrying a ``tEXt``
 "workflow" chunk (like ``SaveImage``), also written to the fake output mount on disk.
-Output size and count come from ``EmptyLatentImage`` (txt2img) or, for img2img graphs,
-from the uploaded ``LoadImage`` file and ``RepeatLatentBatch.amount``.
+Output size and count come from ``EmptyLatentImage``/``EmptySD3LatentImage`` (txt2img)
+or, for img2img graphs, from the uploaded ``LoadImage`` file and ``RepeatLatentBatch.amount``.
+``extra_checkpoints`` adds file names to the listed ``CheckpointLoaderSimple`` options.
 """
 
 from __future__ import annotations
@@ -123,6 +124,7 @@ class FakeComfy:
         self.history_deletes: list[str] = []
         self.view_calls = 0
         self.object_info_calls = 0
+        self.extra_checkpoints: list[str] = []  # appended to the listed checkpoint files
         self.requests: list[tuple[str, str]] = []
 
     # --------------------------------------------------------------- helpers
@@ -154,7 +156,7 @@ class FakeComfy:
             self.history[pid] = _fixture_history(name, pid)
             return
         graph = p["graph"]
-        latents = _nodes(graph, "EmptyLatentImage")
+        latents = _nodes(graph, "EmptyLatentImage") or _nodes(graph, "EmptySD3LatentImage")
         if latents:
             w, h, n = latents[0]["width"], latents[0]["height"], latents[0]["batch_size"]
         else:  # img2img: size of the uploaded LoadImage input, n from RepeatLatentBatch
@@ -312,6 +314,9 @@ class FakeComfy:
             data["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0] = [
                 "v1-5-pruned-emaonly.safetensors"
             ]
+        spec = data["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"]
+        files = spec[1]["options"] if spec[0] == "COMBO" else spec[0]
+        files.extend(self.extra_checkpoints)
         return httpx.Response(200, json=data)
 
 
