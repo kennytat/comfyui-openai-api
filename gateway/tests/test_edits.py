@@ -748,11 +748,15 @@ def test_configure_pillow_sets_global_limit():
 
 
 def test_pillow_limit_never_below_largest_output(tmp_path, fake):
+    from app.comfy.workflows import Registry, parse_size
     from app.main import create_app
     from tests.helpers import make_settings
 
-    create_app(make_settings(tmp_path, max_input_pixels=1000), comfy_transport=fake.transport)
-    assert Image.MAX_IMAGE_PIXELS == 1024 * 1024  # largest registered output size
+    app = create_app(make_settings(tmp_path, max_input_pixels=1000), comfy_transport=fake.transport)
+    registry: Registry = app.state.registry
+    largest = max(w * h for m in registry.models for w, h in map(parse_size, m.sizes))
+    assert largest >= 1024 * 1024
+    assert Image.MAX_IMAGE_PIXELS == largest  # largest registered output size
     create_app(make_settings(tmp_path), comfy_transport=fake.transport)
     assert Image.MAX_IMAGE_PIXELS == 16_777_216
 

@@ -15,8 +15,14 @@ from app.uploads import MASK_FEATHER_FRACTION, prepare_inputs
 
 WORKFLOWS = Path(__file__).resolve().parents[1] / "workflows"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "object_info_sdxl.json"
-SIZES = {"sdxl": (1024, 1024), "sd15": (512, 512), "flux-schnell": (1024, 1024)}
-DENOISE = {"sdxl": 1.0, "sd15": 1.0, "flux-schnell": 0.8}
+SIZES = {
+    "sdxl": (1024, 1024),
+    "sd15": (512, 512),
+    "flux-schnell": (1024, 1024),
+    "flux-dev": (1024, 1024),
+    "qwen-image": (1328, 1328),
+}
+DENOISE = {"sdxl": 1.0, "sd15": 1.0, "flux-schnell": 0.8, "flux-dev": 0.8, "qwen-image": 1.0}
 
 
 @pytest.fixture(scope="module")
@@ -102,7 +108,8 @@ def test_inpaint_graph_composites_original_outside_mask(registry, object_info, m
     skip = [(f.loader, f.input) for f in model.required_files] + op.upload_inputs()
     assert validate_graph(graph, object_info, skip_combo=skip) == []
 
-    ckpt = _only(graph, "CheckpointLoaderSimple")
+    loader = "UNETLoader" if model_id == "qwen-image" else "CheckpointLoaderSimple"
+    ckpt = _only(graph, loader)
     image = _only(graph, "LoadImage")
     mask = _only(graph, "LoadImageMask")
     decode = _only(graph, "VAEDecode")
@@ -131,10 +138,18 @@ def test_inpaint_graph_composites_original_outside_mask(registry, object_info, m
     assert _inputs(graph, _only(graph, "SaveImage"))["images"] == [comp, 0]
 
     model_src = _inputs(graph, sampler)["model"][0]
-    if model_id == "flux-schnell":
-        # 4-step distilled flux: no differential diffusion (it hardens the core into a
-        # pasted-on patch); a higher constant shift keeps the start sigma below 1 so the
-        # masked area sees its surroundings.
+    if model_id == "qwen-image":
+        # Lightning-distilled Qwen-Image: plain noise mask at full denoise blends well
+        # (the composite restores the outside); AuraFlow shift on the LoRA-patched model.
+        assert not [v for v in graph.values() if v["class_type"] == "DifferentialDiffusion"]
+        assert graph[model_src]["class_type"] == "ModelSamplingAuraFlow"
+        lora = _inputs(graph, model_src)["model"][0]
+        assert graph[lora]["class_type"] == "LoraLoaderModelOnly"
+        assert _inputs(graph, lora)["model"] == [ckpt, 0]
+    elif model_id.startswith("flux"):
+        # distilled flux (schnell 4 steps, dev 15): no differential diffusion (it hardens
+        # the core into a pasted-on patch); a higher constant shift keeps the start sigma
+        # below 1 so the masked area sees its surroundings.
         assert not [v for v in graph.values() if v["class_type"] == "DifferentialDiffusion"]
         assert graph[model_src]["class_type"] == "ModelSamplingFlux"
         shift = _inputs(graph, model_src)

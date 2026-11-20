@@ -15,7 +15,9 @@ is set and not yet triggered. Outputs are 64x64-or-requested-size PNGs carrying 
 "workflow" chunk (like ``SaveImage``), also written to the fake output mount on disk.
 Output size and count come from ``EmptyLatentImage``/``EmptySD3LatentImage`` (txt2img)
 or, for img2img graphs, from the uploaded ``LoadImage`` file and ``RepeatLatentBatch.amount``.
-``extra_checkpoints`` adds file names to the listed ``CheckpointLoaderSimple`` options.
+``extra_checkpoints`` adds file names to the listed ``CheckpointLoaderSimple`` options;
+``loader_files[(loader, input)]`` lists files for any other loader (``/object_info/<loader>``,
+legacy combo format), e.g. ``UNETLoader.unet_name`` for split-file models.
 """
 
 from __future__ import annotations
@@ -125,6 +127,7 @@ class FakeComfy:
         self.view_calls = 0
         self.object_info_calls = 0
         self.extra_checkpoints: list[str] = []  # appended to the listed checkpoint files
+        self.loader_files: dict[tuple[str, str], list[str]] = {}  # other loaders' files
         self.requests: list[tuple[str, str]] = []
 
     # --------------------------------------------------------------- helpers
@@ -225,6 +228,11 @@ class FakeComfy:
             return await self._view(request)
         if method == "GET" and path == "/object_info/CheckpointLoaderSimple":
             return await self._object_info()
+        if method == "GET" and path.startswith("/object_info/"):
+            loader = path.removeprefix("/object_info/")
+            required = {i: [list(f)] for (lo, i), f in self.loader_files.items() if lo == loader}
+            if required:
+                return httpx.Response(200, json={loader: {"input": {"required": required}}})
         if method == "GET" and path == "/system_stats":
             return httpx.Response(200, json={"system": {"os": "posix"}, "devices": []})
         return httpx.Response(404, json={"error": "not found"})

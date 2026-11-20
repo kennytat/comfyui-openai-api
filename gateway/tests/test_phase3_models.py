@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,14 @@ def _decode(item: dict) -> Image.Image:
     img = Image.open(io.BytesIO(base64.b64decode(item["b64_json"])))
     img.load()
     return img
+
+
+def _transparent_mask(size: int) -> bytes:
+    m = Image.new("RGBA", (size, size), (0, 0, 0, 255))
+    m.paste((0, 0, 0, 0), (size // 4, size // 4, 3 * size // 4, 3 * size // 4))
+    buf = io.BytesIO()
+    m.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _nodes(graph: dict, class_type: str) -> list[dict]:
@@ -236,3 +245,263 @@ async def test_flux_n_max_rejected_up_front_when_too_expensive(gw):
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "request_too_expensive"
     assert gw.fake.prompt_bodies == [] and gw.queue.active == 0
+
+
+# ------------------------------------------------------------------ flux-dev
+
+FLUX_DEV_CKPT = "flux1-dev-fp8.safetensors"
+
+
+def test_flux_dev_entry(registry):
+    dev = registry.get("flux-dev")
+    assert dev.enabled and dev.checkpoint == FLUX_DEV_CKPT
+    assert dev.default_size == "1024x1024"
+    assert dev.sizes == registry.get("sdxl").sizes
+    assert dev.size_aliases == registry.get("sdxl").size_aliases
+    assert dev.resolve_steps(None) == dev.resolve_steps("standard") == dev.defaults["steps"]
+    assert dev.resolve_steps("low") < dev.resolve_steps("standard")
+    assert set(dev.operations) == {"edit", "edit_masked", "variation"}
+    # cfg_scale drives the distilled FluxGuidance (default 3.5); no negative prompt.
+    assert dev.defaults["cfg_scale"] == 3.5
+    for op in (dev.operation(name) for name in OPERATIONS):
+        assert "negative_prompt" not in op.bindings
+        node_id, input_name = op.bindings["cfg_scale"]
+        assert op.workflow[node_id]["class_type"] == "FluxGuidance" and input_name == "guidance"
+
+
+@pytest.mark.parametrize("operation", list(OPERATIONS))
+def test_flux_dev_graphs_validate_and_bind_guidance(registry, object_info, operation):
+    dev = registry.get("flux-dev")
+    op = dev.operation(operation)
+    params = GenerationParams(
+        prompt="a lighthouse",
+        width=1216,
+        height=832,
+        n=2,
+        seed=11,
+        negative_prompt="blurry",
+        operation=operation,
+        image="openai-api/j_image.png",
+        mask="openai-api/j_mask.png",
+    )
+    graph = build_prompt(dev, params)
+    assert {n["ckpt_name"] for n in _nodes(graph, "CheckpointLoaderSimple")} == {FLUX_DEV_CKPT}
+    skip = [(f.loader, f.input) for f in dev.required_files] + op.upload_inputs()
+    assert validate_graph(graph, object_info, skip_combo=skip) == []
+    ks = _nodes(graph, "KSampler")[0]
+    assert (ks["cfg"], ks["sampler_name"], ks["scheduler"]) == (1.0, "euler", "simple")
+    assert ks["steps"] == dev.defaults["steps"] and ks["seed"] == 11
+    # The positive conditioning goes through FluxGuidance; guidance defaults to 3.5.
+    guidance_id = ks["positive"][0]
+    assert graph[guidance_id]["class_type"] == "FluxGuidance"
+    assert graph[guidance_id]["inputs"]["guidance"] == 3.5
+    pos = graph[guidance_id]["inputs"]["conditioning"][0]
+    assert graph[pos]["inputs"]["text"] == "a lighthouse"
+    assert "blurry" not in [n["text"] for n in _nodes(graph, "CLIPTextEncode")]
+    graph = build_prompt(dev, replace(params, cfg_scale=5.0))
+    assert _nodes(graph, "FluxGuidance")[0]["guidance"] == 5.0
+    if operation == "generate":
+        latent = _nodes(graph, "EmptySD3LatentImage")[0]
+        assert (latent["width"], latent["height"], latent["batch_size"]) == (1216, 832, 2)
+
+
+def test_flux_dev_quality_steps_fit_budget_for_one_image(registry):
+    """Every quality must be admissible warm at n=1 within the 80 s generation budget."""
+    from app.comfy.workflows import estimate_seconds
+
+    dev = registry.get("flux-dev")
+    for quality in dev.quality_steps:
+        for size in dev.sizes:
+            w, h = map(int, size.split("x"))
+            p = GenerationParams(prompt="x", width=w, height=h, n=1, quality=quality)
+            for name in OPERATIONS:
+                est = estimate_seconds(
+                    dev, replace(p, operation=name), FLUX_DEV_CKPT, overhead_s=3.0
+                )
+                assert est <= 80, (quality, size, name, est)
+
+
+async def test_flux_dev_end_to_end_and_n_max_rejected(gw):
+    gw.fake.extra_checkpoints = [FLUX_DEV_CKPT]
+    r = await gw.generate(model="flux-dev", size="1024x1792", cfg_scale=4.5)
+    assert r.status_code == 200, r.text
+    assert r.json()["size"] == "768x1344"
+    graph = gw.fake.prompt_bodies[-1]["prompt"]
+    assert _nodes(graph, "FluxGuidance")[0]["guidance"] == 4.5
+
+    r = await gw.edit(model="flux-dev", mask=_transparent_mask(64))
+    assert r.status_code == 200, r.text
+    assert _nodes(gw.fake.prompt_bodies[-1]["prompt"], "ImageCompositeMasked")
+
+    r = await gw.variation(model="flux-dev")
+    assert r.status_code == 200, r.text
+
+    sent = len(gw.fake.prompt_bodies)
+    r = await gw.generate(model="flux-dev", n=4, size="1024x1024")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "request_too_expensive"
+    assert len(gw.fake.prompt_bodies) == sent and gw.queue.active == 0
+
+
+# ------------------------------------------------------------------ qwen-image
+
+QWEN_UNET = "qwen_image_fp8_e4m3fn.safetensors"
+QWEN_TE = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+QWEN_VAE = "qwen_image_vae.safetensors"
+QWEN_NATIVE = {
+    "1328x1328",
+    "1664x928",
+    "928x1664",
+    "1472x1140",
+    "1140x1472",
+    "1584x1056",
+    "1056x1584",
+}
+
+
+def _qwen_loader_files(model) -> dict[tuple[str, str], list[str]]:
+    return {(f.loader, f.input): [f.value] for f in model.required_files}
+
+
+def test_qwen_entry(registry):
+    qwen = registry.get("qwen-image")
+    # Cold-load tracking keys on the diffusion model, listed first.
+    assert qwen.checkpoint == QWEN_UNET
+    files = {(f.loader, f.input): f.value for f in qwen.required_files}
+    assert files[("UNETLoader", "unet_name")] == QWEN_UNET
+    assert files[("CLIPLoader", "clip_name")] == QWEN_TE
+    assert files[("VAELoader", "vae_name")] == QWEN_VAE
+    assert set(qwen.sizes) <= QWEN_NATIVE and qwen.default_size in qwen.sizes
+    # OpenAI sizes map to the nearest native aspect ratio.
+    for src, aspect in (
+        ("1024x1024", 1.0),
+        ("1792x1024", 1.75),
+        ("1024x1792", 1 / 1.75),
+        ("1536x1024", 1.5),
+        ("1024x1536", 1 / 1.5),
+    ):
+        w, h = qwen.resolve_size(src)
+        best = min(
+            (abs(w2 / h2 - aspect), (w2, h2))
+            for w2, h2 in (map(int, s.split("x")) for s in qwen.sizes)
+        )[1]
+        assert (w, h) == best, src
+    assert qwen.resolve_size(None) == qwen.resolve_size("auto")
+    assert qwen.resolve_size("1216x832") is None  # SDXL bucket, not Qwen
+    assert set(qwen.operations) == {"edit", "edit_masked", "variation"}
+
+
+@pytest.mark.parametrize("operation", list(OPERATIONS))
+def test_qwen_graphs_validate_and_load_split_files(registry, object_info, operation):
+    qwen = registry.get("qwen-image")
+    op = qwen.operation(operation)
+    w, h = qwen.resolve_size(None)
+    graph = build_prompt(
+        qwen,
+        GenerationParams(
+            prompt="a lighthouse",
+            width=w,
+            height=h,
+            n=2,
+            seed=13,
+            negative_prompt="blurry",
+            operation=operation,
+            image="openai-api/j_image.png",
+            mask="openai-api/j_mask.png",
+        ),
+    )
+    skip = [(f.loader, f.input) for f in qwen.required_files] + op.upload_inputs()
+    assert validate_graph(graph, object_info, skip_combo=skip) == []
+    assert not _nodes(graph, "CheckpointLoaderSimple")
+    for f in qwen.required_files:
+        assert {n[f.input] for n in _nodes(graph, f.loader)} == {f.value}
+    assert _nodes(graph, "CLIPLoader")[0]["type"] == "qwen_image"
+    sampling = _nodes(graph, "ModelSamplingAuraFlow")
+    assert len(sampling) == 1 and 2.5 <= sampling[0]["shift"] <= 3.5
+    ks = _nodes(graph, "KSampler")[0]
+    assert (ks["sampler_name"], ks["scheduler"], ks["seed"]) == ("euler", "simple", 13)
+    assert ks["steps"] == qwen.defaults["steps"]
+    lora = _nodes(graph, "LoraLoaderModelOnly")
+    if lora:  # Lightning: distilled to cfg 1.0, negative prompt ignored
+        assert ks["cfg"] == 1.0
+        assert "blurry" not in [n["text"] for n in _nodes(graph, "CLIPTextEncode")]
+    else:
+        assert ks["cfg"] == qwen.defaults["cfg_scale"]
+        assert "blurry" in [n["text"] for n in _nodes(graph, "CLIPTextEncode")]
+    # every VAE node uses the Qwen VAE, every text node the Qwen text encoder
+    vae_id = next(k for k, v in graph.items() if v["class_type"] == "VAELoader")
+    for node in graph.values():
+        if node["class_type"] in ("VAEDecode", "VAEEncode"):
+            assert node["inputs"]["vae"] == [vae_id, 0]
+    if operation == "generate":
+        latent = _nodes(graph, "EmptySD3LatentImage")[0]
+        assert (latent["width"], latent["height"], latent["batch_size"]) == (w, h, 2)
+
+
+def test_qwen_operation_must_load_required_unet(tmp_path):
+    import shutil
+
+    from app.comfy.workflows import WorkflowError
+
+    d = tmp_path / "wf"
+    shutil.copytree(WORKFLOWS, d)
+    path = d / "qwen-image_inpaint.json"
+    graph = json.loads(path.read_text())
+    next(n for n in graph.values() if n["class_type"] == "UNETLoader")["inputs"]["unet_name"] = (
+        "other_unet.safetensors"
+    )
+    path.write_text(json.dumps(graph))
+    with pytest.raises(WorkflowError, match="edit_masked.*UNETLoader.*other_unet"):
+        Registry.load(d)
+
+
+def test_qwen_estimate_cold_load_keys_on_diffusion_model(registry):
+    from app.comfy.workflows import estimate_seconds
+
+    qwen = registry.get("qwen-image")
+    w, h = qwen.resolve_size(None)
+    p = GenerationParams(prompt="x", width=w, height=h, n=1)
+    warm = estimate_seconds(qwen, p, QWEN_UNET, overhead_s=3.0)
+    assert estimate_seconds(qwen, p, QWEN_TE, overhead_s=3.0) == warm + qwen.cold_load_s
+    if qwen.enabled:  # default quality must be admissible warm at n=1 (80 s budget)
+        for name in OPERATIONS:
+            assert estimate_seconds(qwen, replace(p, operation=name), QWEN_UNET, 3.0) <= 80
+
+
+async def test_qwen_listed_only_with_all_files(gw):
+    qwen = gw.app.state.registry.get("qwen-image")
+    files = _qwen_loader_files(qwen)
+    partial = dict(files)
+    partial.pop(("VAELoader", "vae_name"))
+    gw.fake.loader_files = partial
+    r = await gw.client.get("/v1/models", headers=AUTH)
+    assert "qwen-image" not in [m["id"] for m in r.json()["data"]]
+    gw.fake.loader_files = files
+    gw.app.state.catalog._available = None
+    r = await gw.client.get("/v1/models", headers=AUTH)
+    ids = [m["id"] for m in r.json()["data"]]
+    assert ("qwen-image" in ids) == qwen.enabled
+
+
+async def test_qwen_end_to_end(gw):
+    qwen = gw.app.state.registry.get("qwen-image")
+    if not qwen.enabled:
+        pytest.skip("qwen-image is disabled in the registry")
+    gw.fake.loader_files = _qwen_loader_files(qwen)
+    r = await gw.generate(model="qwen-image", size="1792x1024")
+    assert r.status_code == 200, r.text
+    w, h = qwen.resolve_size("1792x1024")
+    assert r.json()["size"] == f"{w}x{h}" and _decode(r.json()["data"][0]).size == (w, h)
+    graph = gw.fake.prompt_bodies[-1]["prompt"]
+    assert _nodes(graph, "UNETLoader")[0]["unet_name"] == QWEN_UNET
+
+    r = await gw.edit(model="qwen-image", mask=_transparent_mask(64))
+    assert r.status_code == 200, r.text
+    assert _nodes(gw.fake.prompt_bodies[-1]["prompt"], "ImageCompositeMasked")
+    r = await gw.variation(model="qwen-image")
+    assert r.status_code == 200, r.text
+
+    sent = len(gw.fake.prompt_bodies)
+    r = await gw.generate(model="qwen-image", n=4)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "request_too_expensive"
+    assert len(gw.fake.prompt_bodies) == sent and gw.queue.active == 0

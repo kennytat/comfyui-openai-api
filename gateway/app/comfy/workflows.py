@@ -10,7 +10,8 @@ Public API:
   (``param -> (node_id, input_name)``), ``output_node``, ``sizes`` (``"WxH"`` whitelist),
   ``size_aliases`` (``"WxH" -> "WxH"``), ``default_size``, ``quality_steps``,
   ``defaults``, ``est_seconds_per_step``, ``cold_load_s``.
-  Helpers: ``checkpoint`` (first required file value, used for cold-load tracking),
+  Helpers: ``checkpoint`` (first required file value, used for cold-load tracking; list
+  the main weights first, e.g. the diffusion model of a split UNET/CLIP/VAE model),
   ``resolve_size(size) -> (w, h) | None`` (``None``/``"auto"`` -> default; aliases
   applied; ``None`` if not allowed), ``resolve_steps(quality, steps) -> int``
   (explicit ``steps`` wins over ``quality``).
@@ -374,26 +375,26 @@ def _parse_operation(name: str, raw: Any, directory: Path, model_id: str) -> Ope
 def _check_operation_checkpoints(
     model_id: str, required_files: tuple[RequiredFile, ...], operations: dict[str, Operation]
 ) -> None:
-    """Operation workflows must load the model's required checkpoint (cold-load tracking
-    and availability checks assume one set of weights per model)."""
-    required = {
-        f.value
-        for f in required_files
-        if f.loader == "CheckpointLoaderSimple" and f.input == "ckpt_name"
-    }
+    """Operation workflows must load the model's required files (cold-load tracking and
+    availability checks assume one set of weights per model). Every loader node whose
+    ``(class_type, input)`` names a required file must use one of the required values."""
+    required: dict[tuple[str, str], set[str]] = {}
+    for f in required_files:
+        required.setdefault((f.loader, f.input), set()).add(f.value)
     if not required:
         return
     for name, op in operations.items():
         for node_id, node in op.workflow.items():
-            if node["class_type"] != "CheckpointLoaderSimple":
-                continue
-            ckpt = node["inputs"].get("ckpt_name")
-            if ckpt not in required:
-                raise WorkflowError(
-                    f"model {model_id!r} operation {name!r}: node {node_id!r} loads checkpoint "
-                    f"{ckpt!r}, expected the model's required checkpoint "
-                    f"{sorted(required)[0]!r}"
-                )
+            for (loader, input_name), values in required.items():
+                if node["class_type"] != loader:
+                    continue
+                value = node["inputs"].get(input_name)
+                if value not in values:
+                    raise WorkflowError(
+                        f"model {model_id!r} operation {name!r}: node {node_id!r} loads "
+                        f"{loader}.{input_name} {value!r}, expected the model's required file "
+                        f"{sorted(values)[0]!r}"
+                    )
 
 
 def _entry_from_dict(raw: dict[str, Any], directory: Path) -> ModelEntry:

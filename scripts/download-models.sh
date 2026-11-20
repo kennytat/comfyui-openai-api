@@ -16,6 +16,9 @@ mkdir -p \
   comfyui/storage-nodes/custom_nodes \
   comfyui/storage-models/models/checkpoints \
   comfyui/storage-models/models/vae \
+  comfyui/storage-models/models/diffusion_models \
+  comfyui/storage-models/models/text_encoders \
+  comfyui/storage-models/models/loras \
   comfyui/storage-models/hf-hub \
   comfyui/storage-models/torch-hub \
   comfyui/storage-user/input/openai-api \

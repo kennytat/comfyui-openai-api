@@ -13,17 +13,29 @@ An OpenAI-compatible Images API in front of a local ComfyUI:
 
 ## Models
 
-| `model` | Operations | Native sizes (`size`) | OpenAI size aliases | Steps (`quality`) | Typical latency, RTX 3060 12 GB (warm / first request after another model) |
-|---|---|---|---|---|---|
-| `sdxl` (default) | generate, edit, masked edit, variation | 1024x1024, 1152x896, 896x1152, 1216x832, 832x1216, 1344x768, 768x1344, 1536x640, 640x1536 | 1792x1024 -> 1344x768, 1024x1792 -> 768x1344, 1536x1024 -> 1216x832, 1024x1536 -> 832x1216 | low 15, standard/medium/auto 25, hd/high 35 | 1024x1024 25 steps ~19 s (`n=4` ~41 s) / +~20 s |
-| `sd15` | generate, edit, masked edit, variation | 512x512 (default), 640x640, 768x512, 512x768, 768x576, 576x768, 896x512, 512x896 | 1024x1024 and 256x256 -> 512x512, 1536x1024 -> 768x512, 1024x1536 -> 512x768, 1792x1024 -> 896x512, 1024x1792 -> 512x896 | low 15, standard/medium/auto 25, hd/high 35 | 512x512 25 steps ~3 s (`n=4` ~12 s), edits ~3.5 s / +~7 s |
-| `flux-schnell` | generate, edit, masked edit, variation | same as `sdxl` | same as `sdxl` | always 4 | 1024x1024 ~13-14 s (`n=4` ~46-50 s), edits ~14 s / +~38 s (cold `n=4` ~80 s) |
+All five models are enabled in `gateway/workflows/registry.json`; `GET /v1/models` lists each one
+whose files ComfyUI reports. Every model supports generate, edit, masked edit and variation.
 
-- Files: `./scripts/download-models.sh sdxl sd15 flux-schnell` (`scripts/models.manifest`, sha256-verified).
-  `sd15` is `v1-5-pruned-emaonly-fp16.safetensors` (2.1 GB); `flux-schnell` is the all-in-one
-  `flux1-schnell-fp8.safetensors` checkpoint (17.2 GB: fp8 diffusion model, CLIP-L, T5-XXL fp8 and
-  VAE, loaded with `CheckpointLoaderSimple`). `GET /v1/models` lists every enabled model whose files
-  ComfyUI reports.
+| `model` | Files on disk | Native sizes (`size`) | OpenAI size aliases | Steps (`quality`) | Typical latency, RTX 3060 12 GB (warm / first request after another model) |
+|---|---|---|---|---|---|
+| `sdxl` (default) | 6.9 GB (+0.3 GB optional fp16-fix VAE) | 1024x1024, 1152x896, 896x1152, 1216x832, 832x1216, 1344x768, 768x1344, 1536x640, 640x1536 | 1792x1024 -> 1344x768, 1024x1792 -> 768x1344, 1536x1024 -> 1216x832, 1024x1536 -> 832x1216 | low 15, standard/medium/auto 25, hd/high 35 | 1024x1024 25 steps ~19 s (`n=4` ~41 s) / +~20 s |
+| `sd15` | 2.1 GB | 512x512 (default), 640x640, 768x512, 512x768, 768x576, 576x768, 896x512, 512x896 | 1024x1024 and 256x256 -> 512x512, 1536x1024 -> 768x512, 1024x1536 -> 512x768, 1792x1024 -> 896x512, 1024x1792 -> 512x896 | low 15, standard/medium/auto 25, hd/high 35 | 512x512 25 steps ~3 s (`n=4` ~12 s), edits ~3.5 s / +~7 s |
+| `flux-schnell` | 17.2 GB | same as `sdxl` | same as `sdxl` | always 4 | 1024x1024 ~13-14 s (`n=4` ~46-50 s), edits ~14 s / +~38 s (cold `n=4` ~80 s) |
+| `flux-dev` | 17.2 GB | same as `sdxl` | same as `sdxl` | low 10, standard/medium/auto 12, hd/high 18 | 1024x1024 12 steps ~31-40 s, hd ~48-53 s, `n=2` ~62 s (`n>=3` rejected up front), edits ~33 s / +~40 s (cold 12 steps ~72 s) |
+| `qwen-image` | 31.8 GB (20.4 diffusion model + 9.4 text encoder + 0.25 VAE + 1.7 Lightning LoRA) | 1328x1328 (default), 1664x928, 928x1664, 1472x1140, 1140x1472, 1584x1056, 1056x1584 | 1024x1024 -> 1328x1328, 1792x1024 -> 1664x928, 1024x1792 -> 928x1664, 1536x1024 -> 1584x1056, 1024x1536 -> 1056x1584 | low 6, all others 8 (Lightning) | 1328x1328 ~56-59 s, low ~44 s, edits ~60 s, `n>=2` rejected up front / **first request after another model: 504** (cold load ~68 s; the retry is warm) |
+
+- Files: `./scripts/download-models.sh sdxl sd15 flux-schnell flux-dev qwen-image qwen-image-te
+  qwen-image-vae qwen-image-lightning` (`scripts/models.manifest`, sha256-verified).
+  `sd15` is `v1-5-pruned-emaonly-fp16.safetensors` (2.1 GB); `flux-schnell` and `flux-dev` are the
+  all-in-one `flux1-schnell-fp8.safetensors` / `flux1-dev-fp8.safetensors` checkpoints (17.2 GB
+  each: fp8 diffusion model, CLIP-L, T5-XXL fp8 and VAE, loaded with `CheckpointLoaderSimple`).
+  `qwen-image` is split: `models/diffusion_models/qwen_image_fp8_e4m3fn.safetensors`
+  (`UNETLoader`), `models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors` (`CLIPLoader`, type
+  `qwen_image`), `models/vae/qwen_image_vae.safetensors` (`VAELoader`) and
+  `models/loras/Qwen-Image-Lightning-8steps-V1.1.safetensors` (lightx2v, `LoraLoaderModelOnly`);
+  the model is listed only when all four are present. Note: the Hugging Face repos
+  `Comfy-Org/flux1-dev` and `Comfy-Org/Qwen-Image_ComfyUI` now redirect to `Comfy-Org/Flux-1-Dev`
+  and `Comfy-Org/Qwen-Image`; the manifest uses the canonical names.
 - **SD 1.5 sizes:** SD 1.5 was trained at 512 px and duplicates subjects above ~0.45 MP, so its
   buckets stay between 0.25 and 0.46 MP (multiples of 64). OpenAI's square sizes (1024x1024 and
   dall-e-2's 256x256) map to 512x512 and the wide/tall ones to the closest aspect ratio; the
@@ -34,17 +46,41 @@ An OpenAI-compatible Images API in front of a local ComfyUI:
   send them). An explicit `steps` still applies. No `FluxGuidance` node: schnell has no guidance
   embedding. The fp8 weights (~11.3 GB) plus T5 do not fit in 12 GB VRAM together; ComfyUI stages
   them with dynamic VRAM loading (peak 11.9 GB VRAM, ~19 GB host RAM for the ComfyUI process).
-- **Switching models** is a full cold load each time: ComfyUI unloads the previous checkpoint itself
+- **Flux dev:** guidance-distilled: KSampler cfg 1.0 (`euler`/`simple`) with a `FluxGuidance` node on
+  the prompt. **`cfg_scale` sets that distilled guidance** (default 3.5; 2-5 is the useful range,
+  the API accepts 1-20); `negative_prompt` is accepted but ignored. Measured ~2.6-3.3 s/step at
+  1024x1024 (the slower end after hours of ComfyUI uptime), so the step counts are capped to keep a
+  cold `n=1` request at the default quality inside the deadline (12 steps: ~72 s right after
+  another model) and a warm `hd` request well inside it (18 steps ~48-53 s). `n=2` fits warm at
+  `standard`/`low`; `n>=3` (and `n=2` at `hd`) is rejected up front with 400
+  `request_too_expensive`. Right after a model switch, `n=2` can exceed the deadline: use `n=1`.
+  Same VRAM/RAM profile as schnell (peak 11.8 GB VRAM, ~19.5 GB ComfyUI RSS).
+- **Qwen-Image:** the 20B fp8 diffusion model (19.5 GB) does not fit in 12 GB, so ComfyUI streams
+  it from host RAM: the base model needs ~12.7 s per step at 1328x1328 (cfg 2.5 = two passes), so
+  20 steps would take ~4.5 min. The gateway therefore uses the **Qwen-Image-Lightning 8-step LoRA**
+  at cfg 1.0 (`ModelSamplingAuraFlow` shift 3.1, `euler`/`simple`, `EmptySD3LatentImage`):
+  ~6.8 s/step, 1328x1328 in ~56-59 s warm. As with Flux, `negative_prompt` and `cfg_scale` are
+  accepted but ignored (cfg 1.0); `quality=low` is 6 steps (~44 s), every other quality 8 (the
+  LoRA is distilled for 8). Only `n=1` fits the budget (`n=2` ~104 s is rejected up front).
+  **Cold start does not fit:** loading the diffusion model and the 7B text encoder from disk takes
+  ~68 s (a direct cold run is ~125 s), so the first `qwen-image` request after another model
+  returns 504 `timeout` after ~80 s. ComfyUI has loaded the model by then, so the next request runs
+  warm (verified: retry 56.9 s). Send a throwaway request (or retry once on 504) after switching to
+  `qwen-image`. Peak 11.8 GB VRAM and ~31.6 GB ComfyUI host RAM (host `MemAvailable` fell to ~8 GB on
+  the 60 GB test machine; keep ~35 GB free for ComfyUI). Edits use VAE-encoded img2img/inpaint on
+  the same model (Qwen-Image-Edit is not used).
+- **Switching models** is a full cold load each time: ComfyUI unloads the previous model itself
   (no `POST /free` needed), and the gateway adds the model's `cold_load_s` to the estimate when the
-  checkpoint changes. A cold `flux-schnell` `n=4` request (~80 s measured) is only admitted on an
-  idle queue because its warm estimate fits; it runs close to the 90 s deadline, so prefer `n<=2`
-  right after a model switch.
+  main weights file changes (the checkpoint, or the diffusion model for `qwen-image`). A cold
+  `flux-schnell` `n=4` request (~80 s measured) is only admitted on an idle queue because its warm
+  estimate fits; it runs close to the 90 s deadline, so prefer `n<=2` right after a model switch.
+  Measured switch timings: `evidence/phase3/switching.json` and `switching_round2.json`.
 
 ## Setup (in this order)
 
 1. `cp .env.example .env`, then set `API_KEYS` (e.g. `openssl rand -hex 32`), `PUBLIC_BASE_URL`
    (https, no trailing slash; only needed for `response_format=url`) and `HF_TOKEN`.
-2. `./scripts/download-models.sh sdxl` (add `sd15 flux-schnell` for the other models) - **the one manual step, run it before the first
+2. `./scripts/download-models.sh sdxl` (add `sd15 flux-schnell flux-dev qwen-image qwen-image-te qwen-image-vae qwen-image-lightning` for the other models) - **the one manual step, run it before the first
    `docker compose up`.** It creates every storage directory the stack mounts (otherwise Docker
    creates them root-owned and later script runs need `sudo`) and downloads the SDXL checkpoint.
    Re-running is a no-op. Run it without arguments to fetch every entry in
@@ -188,7 +224,7 @@ r = client.images.create_variation(model="sdxl", image=open("fox.png", "rb"), n=
   the edit is plain img2img (the image's own alpha is not used as a mask).
 - **Fields:** edits take `prompt` (required), `model`, `n`, `size`, `response_format`, `quality`,
   `output_format`, `output_compression`; variations take `model`, `n`, `size`, `response_format`.
-  Extensions: `seed`, `strength` (denoise 0.05..1.0; defaults: edit 0.7, masked edit 1.0 (flux-schnell 0.8),
+  Extensions: `seed`, `strength` (denoise 0.05..1.0; defaults: edit 0.7, masked edit 1.0 (flux-schnell and flux-dev 0.8),
   variation 0.55), plus `negative_prompt`, `steps`, `cfg_scale` as for generations. `stream`,
   `partial_images > 0` and `background=transparent` are 400 like generations.
 - Uploads go to ComfyUI as `input/openai-api/<job_id>_image.png` / `<job_id>_mask.png` and are
@@ -278,9 +314,11 @@ cancel the ComfyUI job first.
   `cold_load_s: 20`), so estimates sit at or slightly above real times. With the 80 s generation
   budget, `n=4` at `quality=hd` (35 steps) is rejected up front with 400 `request_too_expensive`,
   and only one heavy `n=4` job is queued at a time (others get an immediate 429).
-- `sd15` (`est_seconds_per_step: 0.45`, `cold_load_s: 8`) and `flux-schnell` (`3.2`, `40`, edit
-  `est_factor` 1.0) were calibrated the same way (Phase 3, `evidence/phase3/`); their warm estimates
-  sit 1-20% above measured times (small `sd15` jobs more, because of the fixed 3 s job overhead).
+- `sd15` (`est_seconds_per_step: 0.45`, `cold_load_s: 8`), `flux-schnell` (`3.2`, `40`, edit
+  `est_factor` 1.0), `flux-dev` (`3.0`, `40`) and `qwen-image` (`4.6` per 1024x1024-equivalent
+  megapixel-step, `70`) were calibrated the same way (Phase 3, `evidence/phase3/`); their warm
+  estimates sit 1-25% above measured times (small `sd15` jobs more, because of the fixed 3 s job
+  overhead; `flux-dev` varies ~25% between a fresh and a long-running ComfyUI).
 - Re-calibrate after changing GPU, model or ComfyUI flags: run `tests/smoke/smoke_openai_sdk.py`
   (`tests/smoke/smoke_phase2.py SOURCE.png OUT_DIR` for SDXL edits/variations,
   `tests/smoke/smoke_phase3.py MODEL ALIAS_SIZE OUT_DIR` for any model) and compare

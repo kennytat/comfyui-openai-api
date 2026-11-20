@@ -3,7 +3,11 @@
 hd quality, edit, masked edit and variation through the official ``openai`` SDK.
 
 Env: ``GATEWAY_BASE_URL`` (e.g. ``http://127.0.0.1:8001/v1``), ``GATEWAY_API_KEY``,
-optional ``MAX_N`` (default 4).
+optional ``MAX_N`` (default 4) and ``VARIATION_N`` (default 2; use 1 for models whose
+``n=2`` variation exceeds the generation budget, e.g. flux-dev) and ``COLD_QUALITY``
+(quality of the first, cold request; default unset = the model's default steps) and
+``COLD_TIMEOUT_OK=1`` (a 504 ``timeout`` on the cold request is recorded and accepted: the
+model is loaded by then, so the following requests run warm; e.g. qwen-image).
 Usage: ``python tests/smoke/smoke_phase3.py MODEL ALIAS_SIZE OUT_DIR``
 
 Run it right after a job on a *different* checkpoint so the first request measures the
@@ -50,8 +54,11 @@ def main() -> int:
         timeout=120,
     )
     fox = "a red fox sitting in fresh snow, golden hour, detailed fur"
+    cold = {"prompt": fox}
+    if os.environ.get("COLD_QUALITY"):
+        cold["quality"] = os.environ["COLD_QUALITY"]
     gen_runs = [
-        ("generate_cold", {"prompt": fox}),
+        ("generate_cold", cold),
         ("generate_warm", {"prompt": fox}),
         (f"generate_alias_{alias}", {"prompt": "a lighthouse on a cliff at dusk", "size": alias}),
         (f"generate_n{max_n}", {"prompt": "a bowl of ripe peaches, still life", "n": max_n}),
@@ -74,6 +81,19 @@ def main() -> int:
             ok &= body.get("code") == "request_too_expensive"
             log.append(entry)
             print(f"{name}: {entry['seconds']}s -> 400 {body.get('code')}")
+            return
+        except openai.APIStatusError as exc:
+            if not (
+                name == "generate_cold"
+                and exc.status_code == 504
+                and os.environ.get("COLD_TIMEOUT_OK") == "1"
+            ):
+                raise
+            entry["seconds"] = round(time.monotonic() - t0, 1)
+            body = exc.body if isinstance(exc.body, dict) else {}
+            entry["error"] = {"status": 504, "code": body.get("code")}
+            log.append(entry)
+            print(f"{name}: {entry['seconds']}s -> 504 {body.get('code')} (cold load)")
             return
         entry["seconds"] = round(time.monotonic() - t0, 1)
         entry["response_size"] = resp.size
@@ -125,9 +145,10 @@ def main() -> int:
             shown,
             lambda p=params, f=files: client.images.edit(response_format="b64_json", **f, **p),
         )
-    params = {"model": model, "n": 2}
+    var_n = int(os.environ.get("VARIATION_N", "2"))
+    params = {"model": model, "n": var_n}
     record(
-        "variation_n2",
+        f"variation_n{var_n}",
         "/v1/images/variations",
         {"image": "generate_warm.png", **params},
         lambda: client.images.create_variation(image=image, response_format="b64_json", **params),

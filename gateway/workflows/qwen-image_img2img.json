@@ -1,0 +1,114 @@
+{
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 0,
+      "steps": 8,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 0.7,
+      "model": ["20", 0],
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "latent_image": ["12", 0]
+    },
+    "_meta": {"title": "KSampler"}
+  },
+  "4": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_fp8_e4m3fn.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {"title": "Load Diffusion Model (Qwen-Image fp8)"}
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["18", 0]
+    },
+    "_meta": {"title": "Positive Prompt"}
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["18", 0]
+    },
+    "_meta": {"title": "Negative Prompt (unused: cfg 1.0 ignores it)"}
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["19", 0]
+    },
+    "_meta": {"title": "VAE Decode"}
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "openai-api/check",
+      "images": ["8", 0]
+    },
+    "_meta": {"title": "Save Image"}
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {"title": "Load Image"}
+  },
+  "11": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": ["10", 0],
+      "vae": ["19", 0]
+    },
+    "_meta": {"title": "VAE Encode"}
+  },
+  "12": {
+    "class_type": "RepeatLatentBatch",
+    "inputs": {
+      "samples": ["11", 0],
+      "amount": 1
+    },
+    "_meta": {"title": "Repeat Latent Batch"}
+  },
+  "18": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "_meta": {"title": "Load Text Encoder (Qwen2.5-VL 7B fp8)"}
+  },
+  "19": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "_meta": {"title": "Load VAE (Qwen-Image)"}
+  },
+  "20": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "model": ["21", 0],
+      "shift": 3.1
+    },
+    "_meta": {"title": "Model Sampling AuraFlow (shift 3.1)"}
+  },
+  "21": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": ["4", 0],
+      "lora_name": "Qwen-Image-Lightning-8steps-V1.1.safetensors",
+      "strength_model": 1.0
+    },
+    "_meta": {"title": "Qwen-Image-Lightning 8-step LoRA (cfg 1.0)"}
+  }
+}
