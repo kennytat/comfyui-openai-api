@@ -24,7 +24,9 @@ matched with ``root_path`` stripped and trailing slashes removed.
 ``create_app`` also sets Pillow's process-global decompression-bomb limit once
 (``configure_pillow``), the preprocessing semaphore (``app.state.preprocess_sem``,
 ``MAX_CONCURRENT_PREPROCESS``) and the set of tracked background tasks
-(``app.state.background_tasks``, cancelled on shutdown).
+(``app.state.background_tasks``, cancelled on shutdown), the per-key rate limiter
+(``app.state.rate_limiter``, ``RATE_LIMIT_RPM``) and, with ``ENABLE_METRICS``, the
+Prometheus registry (``app.state.metrics``, ``GET /metrics``, ``MetricsMiddleware``).
 
 The module attribute ``app`` (for ``uvicorn app.main:app``) is built lazily on first access.
 """
@@ -48,8 +50,10 @@ from app.comfy.client import ComfyClient
 from app.comfy.workflows import Registry, parse_size
 from app.config import Settings, load_settings
 from app.errors import install_error_handlers, request_too_large
+from app.metrics import Metrics, MetricsMiddleware
 from app.queue import JobQueue
-from app.routes import files, health, images, models
+from app.ratelimit import RateLimiter
+from app.routes import files, health, images, metrics, models
 from app.routes.models import ModelCatalog
 from app.storage import ImageStore, run_orphan_sweeper, run_ttl_sweeper
 from app.uploads import configure_pillow
@@ -219,6 +223,12 @@ def create_app(
     app.state.input_retry_delay_s = INPUT_RETRY_DELAY_S
     app.state.background_tasks = set()
     app.state.preprocess_sem = asyncio.Semaphore(settings.max_concurrent_preprocess)
+    app.state.rate_limiter = RateLimiter(
+        settings.rate_limit_rpm, settings.rate_limit_burst or max(1, int(settings.rate_limit_rpm))
+    )
+    app.state.metrics = (
+        Metrics(lambda: getattr(app.state, "queue", None)) if settings.enable_metrics else None
+    )
     # Process-global, set once (thread-safe); the per-upload header check stays authoritative.
     # Never below the largest output size, which the encoder re-opens with Pillow too.
     largest_output = max(
@@ -231,11 +241,15 @@ def create_app(
     app.include_router(models.router)
     app.include_router(files.router)
     app.include_router(health.router)
+    if app.state.metrics is not None:
+        app.include_router(metrics.router)
     app.add_middleware(
         BodySizeLimitMiddleware,
         max_bytes=settings.max_body_bytes,
         path_limits={path: settings.max_multipart_bytes for path in images.MULTIPART_PATHS},
     )
+    if app.state.metrics is not None:
+        app.add_middleware(MetricsMiddleware, metrics=app.state.metrics)
     return app
 
 

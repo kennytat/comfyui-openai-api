@@ -60,6 +60,7 @@ from app.comfy.client import (
 from app.comfy.workflows import GenerationParams, ModelEntry, build_prompt, resolve_params
 from app.postprocess import reencode
 from app.queue import Job
+from app.ratelimit import enforce_rate_limit
 from app.schemas import (
     ImageEditRequest,
     ImageGenerationRequest,
@@ -72,7 +73,7 @@ from app.uploads import parse_multipart, prepare_inputs
 log = logging.getLogger("gateway.images")
 job_log = logging.getLogger("gateway.jobs")
 
-router = APIRouter(dependencies=[Depends(require_api_key)])
+router = APIRouter(dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)])
 
 CLEANUP_TIMEOUT_S = 5.0
 _CLEANUP_TASKS: set[asyncio.Future[None]] = set()
@@ -560,3 +561,6 @@ async def _cleanup(
             record["queue_wait_ms"] = _ms(job.submitted_at - t0)
         record["total_ms"] = _ms(time.monotonic() - t0)
         job_log.info(json.dumps(record, sort_keys=True))
+        metrics = getattr(state, "metrics", None)
+        if metrics is not None:
+            metrics.observe_job(record)

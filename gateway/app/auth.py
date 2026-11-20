@@ -23,9 +23,12 @@ async def require_api_key(request: Request) -> None:
     if token is None:
         raise invalid_api_key("You didn't provide an API key. Use 'Authorization: Bearer <key>'.")
     candidate = token.encode()
-    ok = False
-    for key in request.app.state.settings.api_keys:
+    matched: int | None = None
+    for i, key in enumerate(request.app.state.settings.api_keys):
         # no short-circuit: compare against every configured key
-        ok |= hmac.compare_digest(candidate, key.encode())
-    if not ok:
+        if hmac.compare_digest(candidate, key.encode()) and matched is None:
+            matched = i
+    if matched is None:
         raise invalid_api_key()
+    # Position in API_KEYS (never the key itself): rate-limit bucket and metrics label.
+    request.state.api_key_id = matched

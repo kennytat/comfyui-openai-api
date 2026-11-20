@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     est_scale_min: float = 0.75
     est_scale_max: float = 1.5
     est_calibration_min_samples: int = 3
+    # Per-API-key token bucket on the image endpoints; 0 disables. Burst 0 -> max(1, rpm).
+    rate_limit_rpm: float = 0.0
+    rate_limit_burst: int = 0
+    # Prometheus text exposition at GET /metrics (Bearer API key required).
+    enable_metrics: bool = True
     poll_interval_s: float = 0.5
     comfy_queue_poll_s: float = 2.0
     image_store_dir: str = "/data/images"
@@ -92,6 +97,8 @@ class Settings(BaseSettings):
             raise ValueError("need 0 < EST_SCALE_MIN <= 1 <= EST_SCALE_MAX")
         if self.est_calibration_min_samples < 1:
             raise ValueError("EST_CALIBRATION_MIN_SAMPLES must be >= 1")
+        if self.rate_limit_rpm < 0 or self.rate_limit_burst < 0:
+            raise ValueError("RATE_LIMIT_RPM and RATE_LIMIT_BURST must be >= 0")
         if self.max_multipart_bytes <= 0:
             self.max_multipart_bytes = 2 * self.max_upload_bytes + 64 * 1024
         if self.max_multipart_bytes < self.max_upload_bytes:

@@ -123,6 +123,9 @@ Only the variables below reach the gateway container (explicit `environment:` in
 | `EST_EWMA_ALPHA` | `0.2` | Weight of the newest observation in the moving averages |
 | `EST_SCALE_MIN` / `EST_SCALE_MAX` | `0.75` / `1.5` | Clamp of the learned factor (must satisfy `0 < MIN <= 1 <= MAX`) |
 | `EST_CALIBRATION_MIN_SAMPLES` | `3` | Observations per model before the factor is applied (1.0 until then) |
+| `RATE_LIMIT_RPM` | `0` | Requests per minute per API key on `/v1/images/*` (token bucket; `0` = off). Over the limit: 429 `rate_limit_exceeded` with `Retry-After` (the OpenAI SDKs retry it) |
+| `RATE_LIMIT_BURST` | `0` | Bucket size; `0` = `max(1, RATE_LIMIT_RPM)` |
+| `ENABLE_METRICS` | `true` | Serve Prometheus metrics at `GET /metrics` (requires a Bearer API key) |
 | `POLL_INTERVAL_S` | `0.5` | ComfyUI `/history` poll interval |
 | `COMFY_QUEUE_POLL_S` | `2` | ComfyUI `/queue` poll interval for external load |
 | `IMAGE_URL_TTL_S` | `3600` | Lifetime of hosted image URLs |
@@ -260,6 +263,7 @@ All errors use the OpenAI envelope `{"error": {"message", "type", "param", "code
 | Model without the requested operation (edit/variation) | 400 | `unsupported_value` (`param=model`) | |
 | Queue full | 429 | `queue_full` | `Retry-After` |
 | Estimated wait exceeds budget | 429 | `estimated_wait_exceeded` | `Retry-After` |
+| Per-key rate limit (`RATE_LIMIT_RPM`) | 429 | `rate_limit_exceeded` | `Retry-After` |
 | ComfyUI rejected the prompt (`node_errors`) | 502 | `upstream_error` | `x-should-retry: false` |
 | ComfyUI execution error | 502 | `upstream_error` | |
 | ComfyUI out of memory | 502 | `upstream_oom` | `x-should-retry: false` |
@@ -272,6 +276,17 @@ All errors use the OpenAI envelope `{"error": {"message", "type", "param", "code
 `x-should-retry: false` stops the SDK's automatic retries (it otherwise retries 408/409/429/5xx
 twice), so one 90 s timeout does not become 270 s of GPU work. The SDK honours `Retry-After` only
 up to 60 s; larger values fall back to its own backoff, so treat it as a hint.
+
+## Metrics
+
+`GET /metrics` (Bearer API key, `ENABLE_METRICS=true`) serves Prometheus text format:
+`gateway_http_requests_total{route,method,status}`, `gateway_http_request_duration_seconds`,
+`gateway_jobs_total{model,operation,outcome}`, `gateway_job_duration_seconds{model,operation,phase}`
+(`phase` = `total`, `gpu`, `queue_wait`), `gateway_images_total{model,operation}`,
+`gateway_errors_total{status,code}`, and scrape-time gauges `gateway_queue_active`,
+`gateway_queue_queued`, `gateway_comfy_external_pending`, `gateway_estimated_wait_seconds`,
+`gateway_estimate_scale{model}`. Counters are per gateway process (reset on restart). Prometheus
+scrape config: `authorization: {credentials: <an API key>}`.
 
 ## Limits
 
