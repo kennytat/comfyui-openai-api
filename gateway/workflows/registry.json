@@ -1,0 +1,61 @@
+{
+  "models": [
+    {
+      "id": "sdxl",
+      "workflow": "sdxl.json",
+      "enabled": true,
+      "required_files": [
+        {
+          "loader": "CheckpointLoaderSimple",
+          "input": "ckpt_name",
+          "value": "sd_xl_base_1.0.safetensors"
+        }
+      ],
+      "bindings": {
+        "prompt": ["6", "text"],
+        "negative_prompt": ["7", "text"],
+        "width": ["5", "width"],
+        "height": ["5", "height"],
+        "n": ["5", "batch_size"],
+        "seed": ["3", "seed"],
+        "steps": ["3", "steps"],
+        "cfg_scale": ["3", "cfg"],
+        "filename_prefix": ["9", "filename_prefix"]
+      },
+      "output_node": "9",
+      "default_size": "1024x1024",
+      "sizes": [
+        "1024x1024",
+        "1152x896",
+        "896x1152",
+        "1216x832",
+        "832x1216",
+        "1344x768",
+        "768x1344",
+        "1536x640",
+        "640x1536"
+      ],
+      "size_aliases": {
+        "1792x1024": "1344x768",
+        "1024x1792": "768x1344",
+        "1536x1024": "1216x832",
+        "1024x1536": "832x1216"
+      },
+      "quality_steps": {
+        "low": 15,
+        "standard": 25,
+        "medium": 25,
+        "auto": 25,
+        "hd": 35,
+        "high": 35
+      },
+      "defaults": {
+        "negative_prompt": "",
+        "cfg_scale": 6.5,
+        "steps": 25
+      },
+      "est_seconds_per_step": 0.75,
+      "cold_load_s": 20
+    }
+  ]
+}

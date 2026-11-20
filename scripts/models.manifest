@@ -1,0 +1,5 @@
+# model_id  hf_repo  hf_file  dest_relpath  sha256
+# sha256 "-" means: skip verification (an existing file is treated as present).
+# Fill in a real hash to enable verification and re-download on mismatch.
+sdxl      stabilityai/stable-diffusion-xl-base-1.0  sd_xl_base_1.0.safetensors      comfyui/storage-models/models/checkpoints/sd_xl_base_1.0.safetensors  -
+sdxl-vae  madebyollin/sdxl-vae-fp16-fix             sdxl_vae.safetensors            comfyui/storage-models/models/vae/sdxl_vae_fp16_fix.safetensors       -
