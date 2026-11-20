@@ -34,9 +34,11 @@ Public API:
   ``build_prompt`` calls it too (idempotent).
 - ``build_prompt(model, params) -> dict``: deep-copied graph of ``params.operation``
   patched via its bindings.
-- ``estimate_seconds(model, params, last_checkpoint, overhead_s=3.0) -> float``:
-  ``overhead + steps * est_seconds_per_step * (w*h / 1024**2) * n * est_factor
-  + est_extra_s + (cold_load_s if model.checkpoint != last_checkpoint else 0)``
+- ``compute_seconds(model, params) -> float``: the sampling part,
+  ``steps * est_seconds_per_step * (w*h / 1024**2) * n * est_factor``.
+- ``estimate_seconds(model, params, last_checkpoint, overhead_s=3.0, scale=1.0) -> float``:
+  ``overhead + compute_seconds * scale + est_extra_s
+  + (cold_load_s if model.checkpoint != last_checkpoint else 0)``
   (``est_factor``/``est_extra_s`` of the operation; 1 and 0 for ``generate``). ComfyUI's
   KSampler runs ``steps`` steps whatever ``denoise`` is, so denoise does not scale it.
   A hint for admission.
@@ -61,6 +63,7 @@ __all__ = [
     "RequiredFile",
     "WorkflowError",
     "build_prompt",
+    "compute_seconds",
     "estimate_seconds",
     "parse_size",
     "resolve_params",
@@ -270,18 +273,25 @@ def build_prompt(model: ModelEntry, params: GenerationParams) -> dict[str, Any]:
     return graph
 
 
+def compute_seconds(model: ModelEntry, params: GenerationParams) -> float:
+    """Sampling part of the estimate: ``steps * est_seconds_per_step * MP * n * est_factor``."""
+    op = _require_operation(model, params.operation)
+    steps = model.resolve_steps(params.quality, params.steps)
+    pixels = (params.width * params.height) / (1024 * 1024)
+    return steps * model.est_seconds_per_step * pixels * params.n * op.est_factor
+
+
 def estimate_seconds(
     model: ModelEntry,
     params: GenerationParams,
     last_checkpoint: str | None,
     overhead_s: float = 3.0,
+    scale: float = 1.0,
 ) -> float:
-    """Estimated wall time of one job (admission hint, not a guarantee)."""
+    """Estimated wall time of one job (admission hint, not a guarantee). ``scale``
+    multiplies the sampling part (learned calibration, see ``EstimateCalibrator``)."""
     op = _require_operation(model, params.operation)
-    steps = model.resolve_steps(params.quality, params.steps)
-    pixels = (params.width * params.height) / (1024 * 1024)
-    est = overhead_s + steps * model.est_seconds_per_step * pixels * params.n * op.est_factor
-    est += op.est_extra_s
+    est = overhead_s + compute_seconds(model, params) * scale + op.est_extra_s
     if model.checkpoint != last_checkpoint:
         est += model.cold_load_s
     return float(est)

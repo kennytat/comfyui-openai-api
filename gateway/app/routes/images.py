@@ -417,6 +417,7 @@ async def _run_job(
         "steps": params.steps,
         "seed": params.seed,
         "est_job_s": round(job.est_s, 2),
+        "est_scale": round(job.est_scale, 3),
         "est_wait_s": round(job.est_wait_s, 2),
         "cold_load_applied": job.cold_load_applied,
         "comfy_external_pending": job.comfy_external_pending,

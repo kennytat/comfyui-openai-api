@@ -119,6 +119,10 @@ Only the variables below reach the gateway container (explicit `environment:` in
 | `POSTPROCESS_RESERVE_S` | `10` | Part of the deadline reserved for fetch, encode, base64 |
 | `EST_JOB_OVERHEAD_S` | `3` | Fixed per-job overhead in wait estimates |
 | `EST_EXTERNAL_JOB_S` | `30` | Assumed duration of each non-gateway ComfyUI job |
+| `EST_AUTOCALIBRATE` | `true` | Learn a per-model correction of the sampling estimate from measured GPU time of warm, successful jobs (in memory; reset on restart) |
+| `EST_EWMA_ALPHA` | `0.2` | Weight of the newest observation in the moving averages |
+| `EST_SCALE_MIN` / `EST_SCALE_MAX` | `0.75` / `1.5` | Clamp of the learned factor (must satisfy `0 < MIN <= 1 <= MAX`) |
+| `EST_CALIBRATION_MIN_SAMPLES` | `3` | Observations per model before the factor is applied (1.0 until then) |
 | `POLL_INTERVAL_S` | `0.5` | ComfyUI `/history` poll interval |
 | `COMFY_QUEUE_POLL_S` | `2` | ComfyUI `/queue` poll interval for external load |
 | `IMAGE_URL_TTL_S` | `3600` | Lifetime of hosted image URLs |
@@ -324,6 +328,15 @@ cancel the ComfyUI job first.
   megapixel-step, `70`) were calibrated the same way (Phase 3, `evidence/phase3/`); their warm
   estimates sit 1-25% above measured times (small `sd15` jobs more, because of the fixed 3 s job
   overhead; `flux-dev` varies ~25% between a fresh and a long-running ComfyUI).
+- **Auto-calibration (`EST_AUTOCALIBRATE`, default on):** the registry numbers are the starting
+  point; the gateway then keeps, per model, an exponential moving average of measured / estimated
+  sampling time (GPU time of warm, successful jobs, minus the operation's `est_extra_s`) and its mean
+  deviation, and multiplies the sampling part of every estimate by `mean + deviation`, clamped to
+  `EST_SCALE_MIN..EST_SCALE_MAX`, after `EST_CALIBRATION_MIN_SAMPLES` jobs. Biasing by the deviation
+  keeps estimates at or above typical real times, so a slowed-down GPU (or a model that drifts
+  ~25% like `flux-dev` on a long-running ComfyUI) gets rejected up front instead of timing out,
+  and a fast one admits a bit more. Cold loads are not learned (`cold_load_s` stays static). Each job
+  log line carries `est_scale`; the factors are lost on restart.
 - Re-calibrate after changing GPU, model or ComfyUI flags: run `tests/smoke/smoke_openai_sdk.py`
   (`tests/smoke/smoke_phase2.py SOURCE.png OUT_DIR` for SDXL edits/variations,
   `tests/smoke/smoke_phase3.py MODEL ALIAS_SIZE OUT_DIR` for any model) and compare

@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     postprocess_reserve_s: float = 10.0
     est_job_overhead_s: float = 3.0
     est_external_job_s: float = 30.0
+    # Learned per-model correction of the sampling estimate (EWMA of measured/estimated
+    # GPU time on warm successful jobs), applied as mean + mean deviation, clamped.
+    est_autocalibrate: bool = True
+    est_ewma_alpha: float = 0.2
+    est_scale_min: float = 0.75
+    est_scale_max: float = 1.5
+    est_calibration_min_samples: int = 3
     poll_interval_s: float = 0.5
     comfy_queue_poll_s: float = 2.0
     image_store_dir: str = "/data/images"
@@ -79,6 +86,12 @@ class Settings(BaseSettings):
             raise ValueError("MAX_CONCURRENT_PREPROCESS must be >= 1")
         if self.upload_wait_s <= 0 or self.input_orphan_max_age_s <= 0:
             raise ValueError("UPLOAD_WAIT_S and INPUT_ORPHAN_MAX_AGE_S must be positive")
+        if not 0 < self.est_ewma_alpha <= 1:
+            raise ValueError("EST_EWMA_ALPHA must be in (0, 1]")
+        if not 0 < self.est_scale_min <= 1 <= self.est_scale_max:
+            raise ValueError("need 0 < EST_SCALE_MIN <= 1 <= EST_SCALE_MAX")
+        if self.est_calibration_min_samples < 1:
+            raise ValueError("EST_CALIBRATION_MIN_SAMPLES must be >= 1")
         if self.max_multipart_bytes <= 0:
             self.max_multipart_bytes = 2 * self.max_upload_bytes + 64 * 1024
         if self.max_multipart_bytes < self.max_upload_bytes:

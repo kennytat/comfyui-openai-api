@@ -291,6 +291,11 @@ class _Settings:
     est_external_job_s = 30.0
     generation_budget_s = 80.0
     comfy_queue_poll_s = 0.01
+    est_autocalibrate = True
+    est_ewma_alpha = 0.2
+    est_scale_min = 0.75
+    est_scale_max = 1.5
+    est_calibration_min_samples = 3
 
 
 def _params(model, **kw):
