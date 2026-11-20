@@ -129,6 +129,11 @@ Only the variables below reach the gateway container (explicit `environment:` in
 | `MODEL_REFRESH_MIN_INTERVAL_S` | `5` | Min interval between forced availability refreshes |
 | `LOG_LEVEL` | `info` | Log level |
 
+ComfyUI container: `COMFYUI_MEM_LIMIT` (default `40g`) caps its host RAM (`mem_limit`, no swap).
+Measured peaks: ~20 GB RSS with `flux-schnell`/`flux-dev` loaded, ~32 GB with `qwen-image`; keep the
+limit above ~36 GB if `qwen-image` is enabled. A runaway allocation then OOM-kills (and restarts)
+only ComfyUI instead of other host processes.
+
 Fixed by compose (not user-tunable): `COMFYUI_URL=http://comfyui:8188`, `IMAGE_STORE_DIR=/data/images`,
 `COMFY_OUTPUT_DIR=/comfy-output`, `COMFY_OUTPUT_SUBFOLDER=openai-api`, `COMFY_INPUT_DIR=/comfy-input`,
 `COMFY_INPUT_SUBFOLDER=openai-api`. Only `comfyui/storage-user/{output,input}/openai-api` are mounted

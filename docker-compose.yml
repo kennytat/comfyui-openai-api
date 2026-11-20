@@ -12,6 +12,10 @@ services:
     ports:
       - "127.0.0.1:8188:8188"
       - "127.0.0.1:8390:8390"
+    # Host RAM cap for ComfyUI (weights are staged in host RAM: ~20 GB with a Flux model,
+    # ~32 GB with qwen-image). A runaway allocation then OOM-kills only this container.
+    mem_limit: ${COMFYUI_MEM_LIMIT:-40g}
+    memswap_limit: ${COMFYUI_MEM_LIMIT:-40g}
     environment:
       CLI_ARGS: "--fast fp16_accumulation cublas_ops"
       HF_TOKEN: ${HF_TOKEN}
