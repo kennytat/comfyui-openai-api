@@ -30,8 +30,12 @@ Data:
 - ``OutputImage(filename, subfolder, type)``; ``ReconcileReport``.
 
 ``ComfyClient(base_url, client_id=None, transport=None, poll_interval_s=0.5,
-request_timeout_s=10.0, view_timeout_s=30.0, output_subfolder="openai-api")``:
+request_timeout_s=10.0, view_timeout_s=30.0, output_subfolder="openai-api",
+input_subfolder="openai-api")``:
 
+- ``await upload_image(data, filename, subfolder=None, type="input", overwrite=True)
+  -> str``: ``POST /upload/image`` (multipart); returns the ComfyUI input name
+  ``"<subfolder>/<name>"`` to put into ``LoadImage.image`` / ``LoadImageMask.image``.
 - ``await submit(graph, client_id=None) -> prompt_id``
 - ``await wait_for(prompt_id, deadline_monotonic=None) -> WaitResult``; raises
   ``TimeoutError`` once ``time.monotonic()`` passes the deadline, including while a
@@ -260,8 +264,10 @@ class ComfyClient:
         request_timeout_s: float = 10.0,
         view_timeout_s: float = 30.0,
         output_subfolder: str = "openai-api",
+        input_subfolder: str = "openai-api",
     ):
         self.base_url = base_url.rstrip("/")
+        self.input_subfolder = input_subfolder.strip("/")
         self.client_id = client_id or new_client_id()
         self.poll_interval_s = poll_interval_s
         self.output_subfolder = output_subfolder.strip("/")
@@ -296,6 +302,39 @@ class ComfyClient:
             return resp.json()
         except ValueError as exc:
             raise UpstreamError(f"ComfyUI {method} {path} returned invalid JSON") from exc
+
+    # ------------------------------------------------------------------ upload
+
+    async def upload_image(
+        self,
+        data: bytes,
+        filename: str,
+        subfolder: str | None = None,
+        type: str = "input",
+        overwrite: bool = True,
+    ) -> str:
+        """Upload an input image; returns the name to reference it by in a workflow."""
+        sub = (self.input_subfolder if subfolder is None else subfolder).strip("/")
+        form = {"subfolder": sub, "type": type, "overwrite": "true" if overwrite else "false"}
+        resp = await self._request(
+            "POST",
+            "/upload/image",
+            files={"image": (filename, data, "image/png")},
+            data=form,
+        )
+        if resp.status_code >= 400:
+            raise UpstreamError(f"ComfyUI /upload/image returned HTTP {resp.status_code}")
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise UpstreamError("ComfyUI /upload/image returned invalid JSON") from exc
+        name = body.get("name") if isinstance(body, dict) else None
+        got_sub = str(body.get("subfolder") or "").strip("/") if isinstance(body, dict) else ""
+        if not isinstance(name, str) or not name or "/" in name or "\\" in name:
+            raise UpstreamError("ComfyUI /upload/image response has no valid name")
+        if got_sub != sub:
+            raise UpstreamError(f"ComfyUI stored the upload in unexpected subfolder {got_sub!r}")
+        return f"{sub}/{name}" if sub else name
 
     # ------------------------------------------------------------------ submit
 

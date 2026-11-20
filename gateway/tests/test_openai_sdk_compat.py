@@ -135,3 +135,85 @@ async def test_504_not_retried(gateway_factory):
             await sdk(gw.app, max_retries=2).images.generate(model="sdxl", prompt="x")
         assert gw.fake.prompt_count == 1  # x-should-retry: false honoured
         assert gw.queue.active == 0
+
+
+# ------------------------------------------------------------------ Phase 2: edits/variations
+
+
+def _png(size=(64, 64), color=(30, 90, 160)) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _mask() -> bytes:
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 255))
+    img.paste((0, 0, 0, 0), (16, 16, 48, 48))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _decoded(item) -> Image.Image:
+    img = Image.open(io.BytesIO(base64.b64decode(item.b64_json)))
+    img.load()
+    return img
+
+
+async def test_images_edit(gw):
+    resp = await sdk(gw.app).images.edit(
+        image=("fox.png", _png(), "image/png"),
+        prompt="the same fox wearing a red scarf",
+        model="sdxl",
+        response_format="b64_json",
+        extra_body={"seed": 3, "strength": 0.6},
+    )
+    assert len(resp.data) == 1 and resp.size == "1024x1024"
+    assert _decoded(resp.data[0]).size == (1024, 1024)
+    graph = gw.fake.prompt_bodies[0]["prompt"]
+    assert graph["3"]["inputs"]["denoise"] == 0.6 and graph["3"]["inputs"]["seed"] == 3
+
+
+async def test_images_edit_with_mask_and_size(gw):
+    resp = await sdk(gw.app).images.edit(
+        image=("fox.png", _png(), "image/png"),
+        mask=("mask.png", _mask(), "image/png"),
+        prompt="a small campfire",
+        size="1536x1024",
+        n=2,
+    )
+    assert len(resp.data) == 2 and resp.size == "1216x832"
+    assert all(_decoded(d).size == (1216, 832) for d in resp.data)
+    assert "13" in gw.fake.prompt_bodies[0]["prompt"]  # LoadImageMask node present
+
+
+async def test_images_edit_image_list(gw):
+    resp = await sdk(gw.app).images.edit(image=[("a.png", _png(), "image/png")], prompt="x")
+    assert len(resp.data) == 1
+    with pytest.raises(openai.BadRequestError) as exc:
+        await sdk(gw.app).images.edit(
+            image=[("a.png", _png(), "image/png"), ("b.png", _png(), "image/png")], prompt="x"
+        )
+    assert exc.value.param == "image" and exc.value.code == "unsupported_value"
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # SDK marks dall-e-2 variations
+async def test_images_create_variation(gw):
+    resp = await sdk(gw.app).images.create_variation(
+        image=("fox.png", _png(), "image/png"), n=2, response_format="url"
+    )
+    assert len(resp.data) == 2 and all(d.url for d in resp.data)
+    graph = gw.fake.prompt_bodies[0]["prompt"]
+    assert graph["3"]["inputs"]["denoise"] == 0.55 and graph["12"]["inputs"]["amount"] == 2
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+async def test_images_edit_errors(gw):
+    with pytest.raises(openai.BadRequestError) as exc:
+        await sdk(gw.app).images.edit(
+            image=("fox.png", _png(), "image/png"), mask=("m.png", _png(), "image/png"), prompt="x"
+        )
+    assert exc.value.param == "mask"
+    with pytest.raises(openai.BadRequestError) as exc:
+        await sdk(gw.app).images.create_variation(image=("x.png", b"nope", "image/png"))
+    assert exc.value.param == "image"

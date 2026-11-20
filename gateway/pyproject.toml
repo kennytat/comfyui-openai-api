@@ -8,13 +8,16 @@ version = "0.1.0"
 description = "OpenAI-compatible Images API gateway in front of ComfyUI"
 requires-python = ">=3.12"
 dependencies = [
-  "fastapi>=0.115",
+  # Pinned to the tested minors: app/uploads.py hooks private starlette MultiPartParser
+  # internals (tests/test_edits.py asserts they exist).
+  "fastapi>=0.165,<0.166",
+  "starlette>=1.10,<1.11",
   "uvicorn[standard]>=0.30",
   "httpx>=0.27",
   "pydantic>=2.7",
   "pydantic-settings>=2.3",
   "pillow>=10.3",
-  # Unused in Phase 1 (JSON only); kept for the Phase 2 multipart edits/variations routes.
+  # Multipart parser backend for the edits/variations routes.
   "python-multipart>=0.0.9",
 ]
 

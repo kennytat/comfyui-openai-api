@@ -55,7 +55,71 @@
         "steps": 25
       },
       "est_seconds_per_step": 0.75,
-      "cold_load_s": 20
+      "cold_load_s": 20,
+      "operations": {
+        "edit": {
+          "workflow": "sdxl_img2img.json",
+          "bindings": {
+            "prompt": ["6", "text"],
+            "negative_prompt": ["7", "text"],
+            "n": ["12", "amount"],
+            "seed": ["3", "seed"],
+            "steps": ["3", "steps"],
+            "cfg_scale": ["3", "cfg"],
+            "denoise": ["3", "denoise"],
+            "image": ["10", "image"],
+            "filename_prefix": ["9", "filename_prefix"]
+          },
+          "output_node": "9",
+          "defaults": {
+            "denoise": 0.7
+          },
+          "est_factor": 0.9,
+          "est_extra_s": 0.5
+        },
+        "edit_masked": {
+          "workflow": "sdxl_inpaint.json",
+          "bindings": {
+            "prompt": ["6", "text"],
+            "negative_prompt": ["7", "text"],
+            "n": ["12", "amount"],
+            "seed": ["3", "seed"],
+            "steps": ["3", "steps"],
+            "cfg_scale": ["3", "cfg"],
+            "denoise": ["3", "denoise"],
+            "image": ["10", "image"],
+            "filename_prefix": ["9", "filename_prefix"],
+            "mask": ["13", "image"]
+          },
+          "output_node": "9",
+          "defaults": {
+            "denoise": 0.9
+          },
+          "est_factor": 0.9,
+          "est_extra_s": 0.5
+        },
+        "variation": {
+          "workflow": "sdxl_img2img.json",
+          "bindings": {
+            "prompt": ["6", "text"],
+            "negative_prompt": ["7", "text"],
+            "n": ["12", "amount"],
+            "seed": ["3", "seed"],
+            "steps": ["3", "steps"],
+            "cfg_scale": ["3", "cfg"],
+            "denoise": ["3", "denoise"],
+            "image": ["10", "image"],
+            "filename_prefix": ["9", "filename_prefix"]
+          },
+          "output_node": "9",
+          "defaults": {
+            "denoise": 0.55,
+            "prompt": ""
+          },
+          "est_factor": 0.9,
+          "est_extra_s": 0.5
+        }
+      }
     }
   ]
 }

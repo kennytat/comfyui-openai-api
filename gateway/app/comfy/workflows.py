@@ -17,15 +17,28 @@ Public API:
 - ``Registry.load(dir) -> Registry`` reads ``<dir>/registry.json`` and the referenced
   workflow files and validates them. ``registry.get(model_id) -> ModelEntry | None``,
   ``registry.models`` (all entries, registry order), ``registry.enabled()``.
+- ``Operation``: one workflow of a model for one API operation (``generate``, ``edit``,
+  ``edit_masked``, ``variation``): ``workflow``, ``workflow_file``, ``bindings``,
+  ``output_node``, ``defaults`` (e.g. ``denoise``, ``prompt``), ``est_factor`` and
+  ``est_extra_s`` (estimate tuning). ``generate`` is the model's top-level
+  ``workflow``/``bindings``/``output_node``; the others come from the optional registry
+  ``operations`` object (each validated like the top-level workflow, with the bindings
+  that operation requires). ``model.operation(name) -> Operation | None``.
 - ``GenerationParams``: per-request inputs (prompt, width, height, n, seed, steps,
-  quality, cfg_scale, negative_prompt, filename_prefix).
+  quality, cfg_scale, negative_prompt, filename_prefix, plus ``operation`` and the
+  img2img inputs ``image``/``mask`` (ComfyUI input names) and ``denoise``).
 - ``resolve_params(model, params) -> GenerationParams``: fills defaults (random seed in
-  ``0..2**53``, steps from quality/defaults, cfg, negative prompt). Call it before
-  logging so the actual seed/steps are known; ``build_prompt`` calls it too (idempotent).
-- ``build_prompt(model, params) -> dict``: deep-copied graph patched via the bindings.
+  ``0..2**53``, steps from quality/defaults, cfg, negative prompt, operation defaults for
+  ``denoise``/``prompt``). Call it before logging so the actual seed/steps are known;
+  ``build_prompt`` calls it too (idempotent).
+- ``build_prompt(model, params) -> dict``: deep-copied graph of ``params.operation``
+  patched via its bindings.
 - ``estimate_seconds(model, params, last_checkpoint, overhead_s=3.0) -> float``:
-  ``overhead + steps * est_seconds_per_step * (w*h / 1024**2) * n
-  + (cold_load_s if model.checkpoint != last_checkpoint else 0)``. A hint for admission.
+  ``overhead + steps * est_seconds_per_step * (w*h / 1024**2) * n * est_factor
+  + est_extra_s + (cold_load_s if model.checkpoint != last_checkpoint else 0)``
+  (``est_factor``/``est_extra_s`` of the operation; 1 and 0 for ``generate``). ComfyUI's
+  KSampler runs ``steps`` steps whatever ``denoise`` is, so denoise does not scale it.
+  A hint for admission.
 """
 
 from __future__ import annotations
@@ -39,8 +52,10 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "OPERATIONS",
     "GenerationParams",
     "ModelEntry",
+    "Operation",
     "Registry",
     "RequiredFile",
     "WorkflowError",
@@ -53,11 +68,34 @@ __all__ = [
 REGISTRY_FILE = "registry.json"
 SEED_MAX = 2**53
 REQUIRED_BINDINGS = ("prompt", "width", "height", "n", "seed", "steps", "filename_prefix")
+_IMG2IMG_BINDINGS = ("prompt", "n", "seed", "steps", "filename_prefix", "image", "denoise")
+# Bindings each operation's workflow must provide (others are optional).
+OPERATIONS: dict[str, tuple[str, ...]] = {
+    "generate": REQUIRED_BINDINGS,
+    "edit": _IMG2IMG_BINDINGS,
+    "edit_masked": (*_IMG2IMG_BINDINGS, "mask"),
+    "variation": _IMG2IMG_BINDINGS,
+}
+# Bindings that name an uploaded ComfyUI input file (not in the static combo list).
+UPLOAD_BINDINGS = ("image", "mask")
 _SIZE_RE = re.compile(r"^(\d{2,5})x(\d{2,5})$")
 
 
 class WorkflowError(ValueError):
     """Invalid registry entry or workflow file."""
+
+
+def _parse_defaults(raw: Any, label: str) -> dict[str, Any]:
+    """``defaults`` must be an object; a ``denoise`` default must satisfy 0 < d <= 1."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise WorkflowError(f"{label}: defaults must be an object")
+    if "denoise" in raw:
+        d = raw["denoise"]
+        if isinstance(d, bool) or not isinstance(d, int | float) or not 0 < d <= 1:
+            raise WorkflowError(f"{label}: defaults.denoise must be a number in (0, 1]")
+    return dict(raw)
 
 
 def parse_size(size: str) -> tuple[int, int] | None:
@@ -76,6 +114,27 @@ class RequiredFile:
 
 
 @dataclass(frozen=True)
+class Operation:
+    name: str
+    workflow: dict[str, Any]
+    workflow_file: str
+    bindings: dict[str, tuple[str, str]]
+    output_node: str
+    defaults: dict[str, Any] = field(default_factory=dict)
+    est_factor: float = 1.0
+    est_extra_s: float = 0.0
+
+    def upload_inputs(self) -> list[tuple[str, str]]:
+        """``(class_type, input)`` of inputs that receive uploaded files (combo check skip)."""
+        out = []
+        for name in UPLOAD_BINDINGS:
+            if name in self.bindings:
+                node_id, input_name = self.bindings[name]
+                out.append((self.workflow[node_id]["class_type"], input_name))
+        return out
+
+
+@dataclass(frozen=True)
 class ModelEntry:
     id: str
     workflow: dict[str, Any]
@@ -91,6 +150,15 @@ class ModelEntry:
     defaults: dict[str, Any] = field(default_factory=dict)
     est_seconds_per_step: float = 0.5
     cold_load_s: float = 0.0
+    operations: dict[str, Operation] = field(default_factory=dict)
+
+    def operation(self, name: str = "generate") -> Operation | None:
+        """The workflow for ``name``; ``generate`` is the top-level workflow."""
+        if name == "generate":
+            return Operation(
+                "generate", self.workflow, self.workflow_file, self.bindings, self.output_node
+            )
+        return self.operations.get(name)
 
     @property
     def checkpoint(self) -> str:
@@ -129,22 +197,48 @@ class GenerationParams:
     cfg_scale: float | None = None
     negative_prompt: str | None = None
     filename_prefix: str = "openai-api/job"
+    operation: str = "generate"
+    image: str | None = None  # ComfyUI input name ("<subfolder>/<file>") of an upload
+    mask: str | None = None
+    denoise: float | None = None
+
+
+def _require_operation(model: ModelEntry, name: str) -> Operation:
+    op = model.operation(name)
+    if op is None:
+        raise WorkflowError(f"model {model.id!r} does not support operation {name!r}")
+    return op
 
 
 def resolve_params(model: ModelEntry, params: GenerationParams) -> GenerationParams:
-    """Return params with seed, steps, cfg_scale and negative_prompt filled in."""
+    """Return params with seed, steps, cfg_scale, negative_prompt (and denoise) filled in."""
+    op = _require_operation(model, params.operation)
     seed = params.seed if params.seed is not None else random.randint(0, SEED_MAX)
     steps = model.resolve_steps(params.quality, params.steps)
     cfg = params.cfg_scale if params.cfg_scale is not None else model.defaults.get("cfg_scale")
     neg = params.negative_prompt
     if neg is None:
         neg = model.defaults.get("negative_prompt")
-    return replace(params, seed=seed, steps=steps, cfg_scale=cfg, negative_prompt=neg)
+    denoise = params.denoise if params.denoise is not None else op.defaults.get("denoise")
+    prompt = params.prompt
+    if not prompt and "prompt" in op.defaults:
+        prompt = str(op.defaults["prompt"])
+    return replace(
+        params,
+        prompt=prompt,
+        seed=seed,
+        steps=steps,
+        cfg_scale=cfg,
+        negative_prompt=neg,
+        denoise=None if denoise is None else float(denoise),
+    )
 
 
 def build_prompt(model: ModelEntry, params: GenerationParams) -> dict[str, Any]:
-    """Deep-copy the model's workflow and patch every bound parameter."""
+    """Deep-copy the operation's workflow and patch every bound parameter."""
     p = resolve_params(model, params)
+    op = _require_operation(model, p.operation)
+    required = OPERATIONS.get(op.name, REQUIRED_BINDINGS)
     values: dict[str, Any] = {
         "prompt": p.prompt,
         "negative_prompt": p.negative_prompt,
@@ -155,15 +249,20 @@ def build_prompt(model: ModelEntry, params: GenerationParams) -> dict[str, Any]:
         "steps": p.steps,
         "cfg_scale": p.cfg_scale,
         "filename_prefix": p.filename_prefix,
+        "image": p.image,
+        "mask": p.mask,
+        "denoise": p.denoise,
     }
-    graph = copy.deepcopy(model.workflow)
+    graph = copy.deepcopy(op.workflow)
     for name, value in values.items():
         if value is None:
+            if name in required and name in UPLOAD_BINDINGS:
+                raise WorkflowError(f"operation {op.name!r} needs an uploaded {name!r}")
             continue  # keep the workflow's literal
-        binding = model.bindings.get(name)
+        binding = op.bindings.get(name)
         if binding is None:
-            if name in ("negative_prompt", "cfg_scale"):
-                continue  # optional for models without these inputs
+            if name not in required:
+                continue  # optional for this workflow (e.g. no negative prompt, no size)
             raise WorkflowError(f"model {model.id!r} has no binding for {name!r}")
         node_id, input_name = binding
         graph[node_id]["inputs"][input_name] = value
@@ -177,9 +276,11 @@ def estimate_seconds(
     overhead_s: float = 3.0,
 ) -> float:
     """Estimated wall time of one job (admission hint, not a guarantee)."""
+    op = _require_operation(model, params.operation)
     steps = model.resolve_steps(params.quality, params.steps)
     pixels = (params.width * params.height) / (1024 * 1024)
-    est = overhead_s + steps * model.est_seconds_per_step * pixels * params.n
+    est = overhead_s + steps * model.est_seconds_per_step * pixels * params.n * op.est_factor
+    est += op.est_extra_s
     if model.checkpoint != last_checkpoint:
         est += model.cold_load_s
     return float(est)
@@ -213,6 +314,88 @@ def _load_workflow(path: Path, model_id: str) -> dict[str, Any]:
     return graph
 
 
+def _parse_bindings(
+    raw_bindings: Any, graph: dict[str, Any], label: str, required: tuple[str, ...]
+) -> dict[str, tuple[str, str]]:
+    if not isinstance(raw_bindings, dict):
+        raise WorkflowError(f"{label}: bindings must be an object")
+    bindings: dict[str, tuple[str, str]] = {}
+    for name, target in raw_bindings.items():
+        if not (
+            isinstance(target, list)
+            and len(target) == 2
+            and all(isinstance(t, str) for t in target)
+        ):
+            raise WorkflowError(f"{label}: binding {name!r} must be [node_id, input]")
+        node_id, input_name = target
+        if node_id not in graph:
+            raise WorkflowError(f"{label}: binding {name!r} -> missing node {node_id!r}")
+        if input_name not in graph[node_id]["inputs"]:
+            raise WorkflowError(
+                f"{label}: binding {name!r} -> node {node_id!r} has no input {input_name!r}"
+            )
+        bindings[name] = (node_id, input_name)
+    missing = [b for b in required if b not in bindings]
+    if missing:
+        raise WorkflowError(f"{label}: missing required bindings {missing}")
+    return bindings
+
+
+def _parse_operation(name: str, raw: Any, directory: Path, model_id: str) -> Operation:
+    label = f"model {model_id!r} operation {name!r}"
+    if name not in OPERATIONS or name == "generate":
+        raise WorkflowError(
+            f"{label}: unknown operation (allowed: edit, edit_masked, variation; "
+            "generate is the top-level workflow)"
+        )
+    if not isinstance(raw, dict):
+        raise WorkflowError(f"{label}: must be an object")
+    try:
+        workflow_file = raw["workflow"]
+        graph = _load_workflow(directory / workflow_file, model_id)
+        bindings = _parse_bindings(raw["bindings"], graph, label, OPERATIONS[name])
+        output_node = str(raw["output_node"])
+    except KeyError as exc:
+        raise WorkflowError(f"{label}: missing field {exc.args[0]!r}") from exc
+    if output_node not in graph:
+        raise WorkflowError(f"{label}: output_node {output_node!r} not in workflow")
+    return Operation(
+        name=name,
+        workflow=graph,
+        workflow_file=workflow_file,
+        bindings=bindings,
+        output_node=output_node,
+        defaults=_parse_defaults(raw.get("defaults"), label),
+        est_factor=float(raw.get("est_factor", 1.0)),
+        est_extra_s=float(raw.get("est_extra_s", 0.0)),
+    )
+
+
+def _check_operation_checkpoints(
+    model_id: str, required_files: tuple[RequiredFile, ...], operations: dict[str, Operation]
+) -> None:
+    """Operation workflows must load the model's required checkpoint (cold-load tracking
+    and availability checks assume one set of weights per model)."""
+    required = {
+        f.value
+        for f in required_files
+        if f.loader == "CheckpointLoaderSimple" and f.input == "ckpt_name"
+    }
+    if not required:
+        return
+    for name, op in operations.items():
+        for node_id, node in op.workflow.items():
+            if node["class_type"] != "CheckpointLoaderSimple":
+                continue
+            ckpt = node["inputs"].get("ckpt_name")
+            if ckpt not in required:
+                raise WorkflowError(
+                    f"model {model_id!r} operation {name!r}: node {node_id!r} loads checkpoint "
+                    f"{ckpt!r}, expected the model's required checkpoint "
+                    f"{sorted(required)[0]!r}"
+                )
+
+
 def _entry_from_dict(raw: dict[str, Any], directory: Path) -> ModelEntry:
     model_id = raw.get("id")
     if not isinstance(model_id, str) or not model_id:
@@ -220,31 +403,7 @@ def _entry_from_dict(raw: dict[str, Any], directory: Path) -> ModelEntry:
     try:
         workflow_file = raw["workflow"]
         graph = _load_workflow(directory / workflow_file, model_id)
-
-        bindings: dict[str, tuple[str, str]] = {}
-        for name, target in raw["bindings"].items():
-            if not (
-                isinstance(target, list)
-                and len(target) == 2
-                and all(isinstance(t, str) for t in target)
-            ):
-                raise WorkflowError(
-                    f"model {model_id!r}: binding {name!r} must be [node_id, input]"
-                )
-            node_id, input_name = target
-            if node_id not in graph:
-                raise WorkflowError(
-                    f"model {model_id!r}: binding {name!r} -> missing node {node_id!r}"
-                )
-            if input_name not in graph[node_id]["inputs"]:
-                raise WorkflowError(
-                    f"model {model_id!r}: binding {name!r} -> node {node_id!r} "
-                    f"has no input {input_name!r}"
-                )
-            bindings[name] = (node_id, input_name)
-        missing = [b for b in REQUIRED_BINDINGS if b not in bindings]
-        if missing:
-            raise WorkflowError(f"model {model_id!r}: missing required bindings {missing}")
+        bindings = _parse_bindings(raw["bindings"], graph, f"model {model_id!r}", REQUIRED_BINDINGS)
 
         output_node = str(raw["output_node"])
         if output_node not in graph:
@@ -267,6 +426,13 @@ def _entry_from_dict(raw: dict[str, Any], directory: Path) -> ModelEntry:
             RequiredFile(loader=f["loader"], input=f["input"], value=f["value"])
             for f in raw.get("required_files", [])
         )
+        raw_ops = raw.get("operations", {})
+        if not isinstance(raw_ops, dict):
+            raise WorkflowError(f"model {model_id!r}: operations must be an object")
+        operations = {
+            name: _parse_operation(name, op, directory, model_id) for name, op in raw_ops.items()
+        }
+        _check_operation_checkpoints(model_id, required_files, operations)
         return ModelEntry(
             id=model_id,
             workflow=graph,
@@ -279,9 +445,10 @@ def _entry_from_dict(raw: dict[str, Any], directory: Path) -> ModelEntry:
             size_aliases=aliases,
             default_size=default_size,
             quality_steps=quality_steps,
-            defaults=dict(raw.get("defaults", {})),
+            defaults=_parse_defaults(raw.get("defaults"), f"model {model_id!r}"),
             est_seconds_per_step=float(raw.get("est_seconds_per_step", 0.5)),
             cold_load_s=float(raw.get("cold_load_s", 0.0)),
+            operations=operations,
         )
     except KeyError as exc:
         raise WorkflowError(f"model {model_id!r}: missing registry field {exc.args[0]!r}") from exc

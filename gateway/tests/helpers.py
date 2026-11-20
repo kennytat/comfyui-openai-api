@@ -4,6 +4,7 @@ Imported as ``tests.helpers`` (``pythonpath = ["."]``); the pytest fixtures wrap
 live in ``conftest.py``.
 
 ``FakeComfy`` emulates ``/prompt``, ``/history``, ``/view``, ``/queue``, ``/interrupt``,
+``/upload/image`` (multipart; files land in the fake input mount, ``input_dir``),
 ``/object_info/CheckpointLoaderSimple`` and ``/system_stats`` behind a respx router that is
 injected as the ``ComfyClient`` transport (the ASGI transport used to call the gateway is
 never intercepted). It is stateful: every accepted prompt id is listed in ``/queue``
@@ -12,12 +13,16 @@ set to the submitting client id until it completes, so held jobs are never "lost
 head prompt completes on its next ``/history`` poll unless ``hold`` (an ``asyncio.Event``)
 is set and not yet triggered. Outputs are 64x64-or-requested-size PNGs carrying a ``tEXt``
 "workflow" chunk (like ``SaveImage``), also written to the fake output mount on disk.
+Output size and count come from ``EmptyLatentImage`` (txt2img) or, for img2img graphs,
+from the uploaded ``LoadImage`` file and ``RepeatLatentBatch.amount``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import email.parser
+import email.policy
 import io
 import json
 import time
@@ -69,9 +74,29 @@ def _fixture_history(name: str, pid: str) -> dict[str, Any]:
     return json.loads(raw)[pid]
 
 
+def _nodes(graph: dict[str, Any], class_type: str) -> list[dict[str, Any]]:
+    return [n["inputs"] for n in graph.values() if n.get("class_type") == class_type]
+
+
+def parse_form(request: httpx.Request) -> dict[str, tuple[str | None, bytes]]:
+    """Decode a multipart/form-data request body: name -> (filename, payload)."""
+    head = f"Content-Type: {request.headers['content-type']}\r\n\r\n".encode()
+    msg = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(head + request.content)
+    out: dict[str, tuple[str | None, bytes]] = {}
+    for part in msg.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        out[str(name)] = (part.get_filename(), part.get_payload(decode=True) or b"")
+    return out
+
+
 class FakeComfy:
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(self, output_dir: Path, input_dir: Path | None = None) -> None:
         self.output_dir = output_dir
+        self.input_dir = input_dir or output_dir.parent / "comfy-input"
+        self.input_dir.mkdir(parents=True, exist_ok=True)
+        self.uploads: list[dict[str, Any]] = []  # every /upload/image call
+        self.upload_mode = "ok"  # ok | 500 | rename
+        self.upload_gate: asyncio.Event | None = None
         self.router = respx.Router(base_url=COMFY, assert_all_called=False)
         self.router.route().mock(side_effect=self._handle)
         self.transport = httpx.MockTransport(self.router.async_handler)
@@ -129,10 +154,16 @@ class FakeComfy:
             self.history[pid] = _fixture_history(name, pid)
             return
         graph = p["graph"]
-        latent = graph["5"]["inputs"]
-        w, h, n = latent["width"], latent["height"], latent["batch_size"]
-        seed = graph["3"]["inputs"]["seed"]
-        prefix = graph["9"]["inputs"]["filename_prefix"]
+        latents = _nodes(graph, "EmptyLatentImage")
+        if latents:
+            w, h, n = latents[0]["width"], latents[0]["height"], latents[0]["batch_size"]
+        else:  # img2img: size of the uploaded LoadImage input, n from RepeatLatentBatch
+            name = _nodes(graph, "LoadImage")[0]["image"]
+            with Image.open(self.input_dir / name.rpartition("/")[2]) as src:
+                w, h = src.size
+            n = _nodes(graph, "RepeatLatentBatch")[0]["amount"]
+        seed = _nodes(graph, "KSampler")[0]["seed"]
+        prefix = _nodes(graph, "SaveImage")[0]["filename_prefix"]
         subfolder, _, base = prefix.rpartition("/")
         images = []
         for i in range(n):
@@ -159,6 +190,8 @@ class FakeComfy:
         self.requests.append((method, path))
         if self.down:
             raise httpx.ConnectError("connection refused", request=request)
+        if method == "POST" and path == "/upload/image":
+            return await self._upload(request)
         body = json.loads(request.content) if request.content else {}
         if method == "POST" and path == "/prompt":
             return await self._post_prompt(body)
@@ -222,6 +255,27 @@ class FakeComfy:
             200, json={"prompt_id": pid, "number": len(self.prompts), "node_errors": {}}
         )
 
+    async def _upload(self, request: httpx.Request) -> httpx.Response:
+        form = parse_form(request)
+        filename, data = form["image"]
+        subfolder = form.get("subfolder", (None, b""))[1].decode()
+        record = {
+            "filename": filename,
+            "subfolder": subfolder,
+            "type": form.get("type", (None, b"input"))[1].decode(),
+            "overwrite": form.get("overwrite", (None, b""))[1].decode(),
+            "data": data,
+        }
+        self.uploads.append(record)
+        if self.upload_gate is not None:
+            await self.upload_gate.wait()
+        if self.upload_mode == "500":
+            return httpx.Response(500)
+        name = f"renamed_{filename}" if self.upload_mode == "rename" else filename
+        assert filename and "/" not in filename
+        (self.input_dir / name).write_bytes(data)  # the mount is input/<subfolder>
+        return httpx.Response(200, json={"name": name, "subfolder": subfolder, "type": "input"})
+
     def _get_history(self, pid: str) -> httpx.Response:
         if pid not in self.history and self.queue and self.queue[0] == pid:
             if self.hold is None or self.hold.is_set():
@@ -268,6 +322,7 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         "public_base_url": PUBLIC,
         "image_store_dir": str(tmp_path / "images"),
         "comfy_output_dir": str(tmp_path / "comfy-output"),
+        "comfy_input_dir": str(tmp_path / "comfy-input"),
         "poll_interval_s": 0.01,
         "comfy_queue_poll_s": 0.05,
         "est_job_overhead_s": 1.0,
@@ -295,6 +350,27 @@ class Gateway:
     async def generate(self, **body: Any) -> httpx.Response:
         body.setdefault("prompt", "a red fox")
         return await self.client.post("/v1/images/generations", json=body, headers=AUTH)
+
+    async def edit(
+        self,
+        image: bytes | None = None,
+        mask: bytes | None = None,
+        files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+        **fields: Any,
+    ) -> httpx.Response:
+        """POST /v1/images/edits (multipart). ``files`` overrides the image/mask parts."""
+        fields.setdefault("prompt", "a red fox in snow")
+        if files is None:
+            files = [("image", ("in.png", image if image is not None else make_png(), "image/png"))]
+            if mask is not None:
+                files.append(("mask", ("mask.png", mask, "image/png")))
+        data = {k: str(v) for k, v in fields.items() if v is not None}
+        return await self.client.post("/v1/images/edits", data=data, files=files, headers=AUTH)
+
+    async def variation(self, image: bytes | None = None, **fields: Any) -> httpx.Response:
+        files = [("image", ("in.png", image if image is not None else make_png(), "image/png"))]
+        data = {k: str(v) for k, v in fields.items() if v is not None}
+        return await self.client.post("/v1/images/variations", data=data, files=files, headers=AUTH)
 
     async def wait_until(self, predicate: Callable[[], bool], timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout

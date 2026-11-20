@@ -104,10 +104,12 @@ def _retry_after(seconds: float) -> dict[str, str]:
     return {"Retry-After": str(max(1, math.ceil(seconds)))}
 
 
-def queue_full(retry_after_s: float) -> OpenAIError:
+def queue_full(
+    retry_after_s: float, message: str = "The generation queue is full. Try again later."
+) -> OpenAIError:
     return OpenAIError(
         429,
-        "The generation queue is full. Try again later.",
+        message,
         RATE_LIMIT,
         "queue_full",
         headers=_retry_after(retry_after_s),

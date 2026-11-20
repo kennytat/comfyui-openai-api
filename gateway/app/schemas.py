@@ -13,10 +13,11 @@ HARD_MAX_PROMPT_CHARS = 32000
 HARD_MAX_N = 10
 
 
-class ImageGenerationRequest(BaseModel):
+class ImageOptions(BaseModel):
+    """Options shared by generations, edits and variations (no prompt)."""
+
     model_config = ConfigDict(extra="ignore")
 
-    prompt: str = Field(min_length=1, max_length=HARD_MAX_PROMPT_CHARS)
     model: str | None = None
     n: int | None = Field(default=None, ge=1, le=HARD_MAX_N)
     size: str | None = None
@@ -59,7 +60,8 @@ class ImageGenerationRequest(BaseModel):
 
     def check_limits(self, max_prompt_chars: int, max_n: int) -> None:
         """Enforce the operator-configured limits (raises OpenAIError)."""
-        if len(self.prompt) > max_prompt_chars:
+        prompt = getattr(self, "prompt", None) or ""
+        if len(prompt) > max_prompt_chars:
             raise invalid_value(f"Prompt must be at most {max_prompt_chars} characters.", "prompt")
         if self.negative_prompt is not None and len(self.negative_prompt) > max_prompt_chars:
             raise invalid_value(
@@ -68,6 +70,23 @@ class ImageGenerationRequest(BaseModel):
             )
         if self.n is not None and self.n > max_n:
             raise invalid_value(f"n must be between 1 and {max_n}.", "n")
+
+
+class ImageGenerationRequest(ImageOptions):
+    prompt: str = Field(min_length=1, max_length=HARD_MAX_PROMPT_CHARS)
+
+
+class ImageEditRequest(ImageGenerationRequest):
+    """Multipart text fields of ``/v1/images/edits`` (files are handled separately)."""
+
+    # extension: denoise strength (1.0 = ignore the input image)
+    strength: float | None = Field(default=None, ge=0.05, le=1.0)
+
+
+class ImageVariationRequest(ImageOptions):
+    """Multipart text fields of ``/v1/images/variations``."""
+
+    strength: float | None = Field(default=None, ge=0.05, le=1.0)
 
 
 class ImageData(BaseModel):

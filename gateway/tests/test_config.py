@@ -13,6 +13,11 @@ ENV_NAMES = [
     "MAX_N",
     "MAX_PROMPT_CHARS",
     "MAX_BODY_BYTES",
+    "MAX_UPLOAD_BYTES",
+    "MAX_MULTIPART_BYTES",
+    "MAX_INPUT_PIXELS",
+    "COMFY_INPUT_DIR",
+    "COMFY_INPUT_SUBFOLDER",
     "QUEUE_MAX_DEPTH",
     "REQUEST_TIMEOUT_S",
     "POSTPROCESS_RESERVE_S",
@@ -152,3 +157,32 @@ def test_public_base_url_optional_when_url_format_disabled(url):
 def test_bad_default_response_format_rejected():
     with pytest.raises(ValidationError, match="DEFAULT_RESPONSE_FORMAT"):
         make(DEFAULT_RESPONSE_FORMAT="png")
+
+
+def test_upload_limits_defaults_and_derived_multipart():
+    s = make()
+    assert s.max_upload_bytes == 4 * 1024 * 1024
+    assert s.max_multipart_bytes == 2 * 4 * 1024 * 1024 + 64 * 1024
+    assert s.max_input_pixels == 16_777_216
+    assert s.max_concurrent_preprocess == 2 and s.upload_wait_s == 15.0
+    assert s.input_orphan_max_age_s == 300 and s.orphan_max_age_s == 3600
+    assert s.comfy_input_dir == "/comfy-input" and s.comfy_input_subfolder == "openai-api"
+    s = make(MAX_UPLOAD_BYTES="1000", MAX_MULTIPART_BYTES="0")
+    assert s.max_multipart_bytes == 2000 + 64 * 1024
+    assert make(MAX_MULTIPART_BYTES="5000000").max_multipart_bytes == 5_000_000
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"MAX_UPLOAD_BYTES": "0"},
+        {"MAX_INPUT_PIXELS": "-1"},
+        {"MAX_UPLOAD_BYTES": "5000", "MAX_MULTIPART_BYTES": "4000"},
+        {"MAX_CONCURRENT_PREPROCESS": "0"},
+        {"UPLOAD_WAIT_S": "0"},
+        {"INPUT_ORPHAN_MAX_AGE_S": "0"},
+    ],
+)
+def test_upload_limit_validation(env):
+    with pytest.raises(ValidationError):
+        make(**env)

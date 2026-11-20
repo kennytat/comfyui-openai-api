@@ -5,12 +5,19 @@ Public API:
 - ``Job``: one admitted generation. The route owns its lifecycle; the worker only
   submits it to ComfyUI, waits for completion and resolves ``job.future`` with a
   ``WaitResult`` or an exception (``ComfyError`` subclasses, ``TimeoutError``).
+  ``inputs_ready`` (set for jobs with uploaded inputs, e.g. edits): the worker waits for
+  it (bounded by ``min(generation deadline, now + UPLOAD_WAIT_S)``) before submitting, so
+  the route can upload after admission without racing the worker; ``abandon`` sets it to
+  wake the worker. A job whose uploads miss ``UPLOAD_WAIT_S`` fails with
+  ``UpstreamUnavailable`` (503) so a slow upload never holds the FIFO longer.
+  ``inputs`` lists uploaded ComfyUI input names the route deletes during cleanup.
   Flags: ``cancelled`` (route abandoned it; worker skips/abandons), ``submitted``,
   ``finished_upstream`` (history reached; no cancel needed), ``released``
   (admission slot already returned), ``cleanup_claimed`` (ComfyUI-side cleanup owner
   decided, so cancel/history-delete happen once).
 - ``JobQueue(settings, client)``:
-  - ``admit(model, params, graph, gen_deadline, job_id=None) -> Job``: **synchronous**
+  - ``admit(model, params, graph, gen_deadline, job_id=None, needs_inputs=False) -> Job``:
+    **synchronous**
     (no ``await`` between the checks and ``active += 1``). Raises
     ``request_too_expensive`` (400) when the job alone (warm checkpoint) exceeds the
     generation budget, ``queue_full`` (429) when ``active + comfy_external_pending >=
@@ -19,6 +26,9 @@ Public API:
     (elapsed time since request receipt is charged). Exception: with nothing to wait for,
     a cold-load estimate that does not fit is still admitted when the warm estimate fits
     (a 429 would only loop). Retry-After = estimated wait.
+  - ``precheck(gen_deadline)``: cheap capacity check run before reading a multipart body
+    (same ``queue_full`` threshold as ``admit``; ``estimated_wait_exceeded`` when the
+    current estimated wait alone exceeds the remaining budget). Not a reservation.
   - ``release(job)``: idempotent; decrements ``active`` once. Called only from the
     route's shielded ``finally``.
   - ``abandon(job)``: mark cancelled, stop the worker's wait, cancel the future.
@@ -77,10 +87,17 @@ class Job:
     released: bool = False
     cleanup_claimed: bool = False
     wait_task: asyncio.Task[WaitResult] | None = None
+    inputs_ready: asyncio.Event | None = None
+    inputs: list[str] = field(default_factory=list)
 
     @property
     def checkpoint(self) -> str:
         return self.model.checkpoint
+
+    @property
+    def output_node(self) -> str:
+        op = self.model.operation(self.params.operation)
+        return op.output_node if op is not None else self.model.output_node
 
     def claim_cleanup(self) -> bool:
         """Return True exactly once: the caller owns ComfyUI-side cleanup."""
@@ -128,6 +145,14 @@ class JobQueue:
 
     # ------------------------------------------------------------------ admission
 
+    def precheck(self, gen_deadline: float) -> None:
+        """Reject early (before the upload is read/decoded) when admission cannot succeed."""
+        wait, _ = self.estimated_wait()
+        if self.active + self.comfy_external_pending >= self.settings.queue_max_depth + 1:
+            raise queue_full(wait)
+        if wait > gen_deadline - time.monotonic():
+            raise estimated_wait_exceeded(wait)
+
     def admit(
         self,
         model: ModelEntry,
@@ -135,6 +160,7 @@ class JobQueue:
         graph: dict[str, Any],
         gen_deadline: float,
         job_id: str | None = None,
+        needs_inputs: bool = False,
     ) -> Job:
         """Synchronous admission: checks and the counter increment happen atomically."""
         overhead = self.settings.est_job_overhead_s
@@ -170,6 +196,7 @@ class JobQueue:
             cold_load_applied=model.checkpoint != tail,
             comfy_external_pending=external,
             future=loop.create_future(),
+            inputs_ready=asyncio.Event() if needs_inputs else None,
         )
         self.active += 1
         self._pending.append(job)
@@ -187,6 +214,8 @@ class JobQueue:
     def abandon(self, job: Job) -> None:
         """The route gave up on the job: stop waiting for it and skip it if still queued."""
         job.cancelled = True
+        if job.inputs_ready is not None:
+            job.inputs_ready.set()  # wake a worker waiting for the uploads
         if job.wait_task is not None and not job.wait_task.done():
             job.wait_task.cancel()
         if not job.future.done():
@@ -243,8 +272,29 @@ class JobQueue:
         self.running = job
         job.run_started_at = time.monotonic()
         try:
-            job.state = "submitting"
             loop = asyncio.get_running_loop()
+            if job.inputs_ready is not None and not job.inputs_ready.is_set():
+                job.state = "awaiting_inputs"
+                now = time.monotonic()
+                upload_deadline = now + self.settings.upload_wait_s
+                wait_until = min(job.gen_deadline, upload_deadline)
+                try:
+                    async with asyncio.timeout_at(loop.time() + (wait_until - now)):
+                        await job.inputs_ready.wait()
+                except TimeoutError:
+                    job.state = "timeout"
+                    if upload_deadline < job.gen_deadline:
+                        exc: BaseException = UpstreamUnavailable(
+                            "input upload did not complete within UPLOAD_WAIT_S"
+                        )
+                    else:
+                        exc = TimeoutError("deadline passed while uploading inputs")
+                    _set_exception(job, exc)
+                    return
+            if job.cancelled:
+                job.state = "skipped"
+                return
+            job.state = "submitting"
             try:
                 # a hung /prompt must not block the FIFO past this job's own deadline
                 async with asyncio.timeout_at(loop.time() + (job.gen_deadline - time.monotonic())):

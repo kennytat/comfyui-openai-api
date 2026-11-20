@@ -55,3 +55,38 @@ def test_lazy_module_app(monkeypatch, tmp_path):
     first = main.app
     assert main.app is first
     assert first.state.settings.api_keys == ["k1"]
+
+
+async def test_orphan_sweepers_cover_input_and_output_mounts(tmp_path, fake, clock):
+    settings = make_settings(tmp_path)
+    app = create_app(settings, comfy_transport=fake.transport, clock=clock)
+    async with LifespanManager(app):
+        names = {t.get_name() for t in asyncio.all_tasks()}
+        assert f"orphan-sweeper:{settings.comfy_output_dir}" in names
+        assert f"orphan-sweeper:{settings.comfy_input_dir}" in names
+    app = create_app(
+        make_settings(tmp_path, cleanup_comfy_outputs=False),
+        comfy_transport=fake.transport,
+        clock=clock,
+    )
+    async with LifespanManager(app):
+        names = {t.get_name() for t in asyncio.all_tasks()}
+        assert f"orphan-sweeper:{settings.comfy_input_dir}" in names  # user images: always
+        assert f"orphan-sweeper:{settings.comfy_output_dir}" not in names
+
+
+async def test_input_sweeper_uses_input_max_age(tmp_path, fake, clock, monkeypatch):
+    import app.main as main
+
+    calls: list[tuple] = []
+
+    async def record(sweep_dir, max_age, interval, _clock):
+        calls.append((sweep_dir, max_age, interval))
+
+    monkeypatch.setattr(main, "run_orphan_sweeper", record)
+    settings = make_settings(tmp_path, input_orphan_max_age_s=120, orphan_max_age_s=3600)
+    app = create_app(settings, comfy_transport=fake.transport, clock=clock)
+    async with LifespanManager(app):
+        await asyncio.sleep(0)
+    assert (settings.comfy_input_dir, 120, 120) in calls  # swept at least as often
+    assert (settings.comfy_output_dir, 3600, main.ORPHAN_SWEEP_INTERVAL_S) in calls

@@ -20,6 +20,7 @@ from app.comfy.client import (
     UpstreamUnavailable,
     new_client_id,
 )
+from tests.helpers import parse_form
 
 BASE = "http://comfy.test"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -465,3 +466,47 @@ async def test_unexpected_http_status_is_upstream_error(client, router):
     with pytest.raises(UpstreamError) as ei:
         await client.queue_snapshot()
     assert not isinstance(ei.value, UpstreamUnavailable)
+
+
+# ------------------------------------------------------------------ upload
+
+
+async def test_upload_image_multipart(client, router):
+    route = router.post("/upload/image").respond(
+        200, json={"name": "job_image.png", "subfolder": "openai-api", "type": "input"}
+    )
+    name = await client.upload_image(b"PNGDATA", "job_image.png")
+    assert name == "openai-api/job_image.png"
+    form = parse_form(route.calls[0].request)
+    assert form["image"] == ("job_image.png", b"PNGDATA")
+    assert form["subfolder"][1] == b"openai-api"
+    assert form["type"][1] == b"input" and form["overwrite"][1] == b"true"
+
+
+async def test_upload_image_explicit_subfolder_no_overwrite(client, router):
+    route = router.post("/upload/image").respond(200, json={"name": "a.png", "subfolder": ""})
+    assert await client.upload_image(b"x", "a.png", subfolder="", overwrite=False) == "a.png"
+    assert parse_form(route.calls[0].request)["overwrite"][1] == b"false"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(500),
+        httpx.Response(200, content=b"not json"),
+        httpx.Response(200, json=["a"]),
+        httpx.Response(200, json={"name": "", "subfolder": "openai-api"}),
+        httpx.Response(200, json={"name": "../x.png", "subfolder": "openai-api"}),
+        httpx.Response(200, json={"name": "x.png", "subfolder": "elsewhere"}),
+    ],
+)
+async def test_upload_image_bad_responses(client, router, response):
+    router.post("/upload/image").mock(return_value=response)
+    with pytest.raises(UpstreamError):
+        await client.upload_image(b"x", "x.png")
+
+
+async def test_upload_image_unreachable(client, router):
+    router.post("/upload/image").mock(side_effect=httpx.ConnectError("refused"))
+    with pytest.raises(UpstreamUnavailable):
+        await client.upload_image(b"x", "x.png")

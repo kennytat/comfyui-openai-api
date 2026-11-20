@@ -203,3 +203,127 @@ def test_non_api_node_rejected(tmp_path):
 def test_missing_registry_file(tmp_path):
     with pytest.raises(WorkflowError, match="not found"):
         Registry.load(tmp_path)
+
+
+# ------------------------------------------------------------------ operations (Phase 2)
+
+
+def test_operations_loaded(sdxl):
+    assert set(sdxl.operations) == {"edit", "edit_masked", "variation"}
+    gen = sdxl.operation("generate")
+    assert gen.workflow is sdxl.workflow and gen.output_node == "9"
+    edit = sdxl.operation("edit")
+    assert edit.workflow_file == "sdxl_img2img.json"
+    assert edit.bindings["image"] == ("10", "image")
+    assert edit.bindings["n"] == ("12", "amount")
+    assert edit.defaults["denoise"] == 0.7
+    assert sdxl.operation("edit_masked").bindings["mask"] == ("13", "image")
+    assert sdxl.operation("variation").defaults == {"denoise": 0.55, "prompt": ""}
+    assert sdxl.operation("upscale") is None
+    assert edit.upload_inputs() == [("LoadImage", "image")]
+    assert sdxl.operation("edit_masked").upload_inputs() == [
+        ("LoadImage", "image"),
+        ("LoadImageMask", "image"),
+    ]
+
+
+def test_build_prompt_img2img(sdxl):
+    p = _params(operation="edit", n=2, image="openai-api/j_image.png", denoise=0.4)
+    graph = build_prompt(sdxl, p)
+    assert graph["10"]["inputs"]["image"] == "openai-api/j_image.png"
+    assert graph["12"]["inputs"]["amount"] == 2
+    assert graph["3"]["inputs"]["denoise"] == 0.4
+    assert "5" not in graph  # no EmptyLatentImage; width/height are optional here
+    masked = build_prompt(
+        sdxl,
+        _params(operation="edit_masked", image="openai-api/a.png", mask="openai-api/m.png"),
+    )
+    assert masked["13"]["inputs"] == {"image": "openai-api/m.png", "channel": "alpha"}
+    assert masked["3"]["inputs"]["denoise"] == 0.9  # operation default
+    assert masked["14"]["inputs"] == {"samples": ["11", 0], "mask": ["13", 0]}
+
+
+def test_variation_defaults(sdxl):
+    p = resolve_params(sdxl, _params(prompt="", operation="variation", image="openai-api/x"))
+    assert p.prompt == "" and p.denoise == 0.55
+    assert build_prompt(sdxl, p)["6"]["inputs"]["text"] == ""
+
+
+def test_build_prompt_requires_upload_and_operation(sdxl):
+    with pytest.raises(WorkflowError, match="needs an uploaded 'image'"):
+        build_prompt(sdxl, _params(operation="edit"))
+    with pytest.raises(WorkflowError, match="needs an uploaded 'mask'"):
+        build_prompt(sdxl, _params(operation="edit_masked", image="openai-api/a.png"))
+    with pytest.raises(WorkflowError, match="does not support operation 'upscale'"):
+        build_prompt(sdxl, _params(operation="upscale"))
+    no_ops = dataclasses.replace(sdxl, operations={})
+    with pytest.raises(WorkflowError, match="does not support"):
+        resolve_params(no_ops, _params(operation="variation"))
+
+
+def test_estimate_seconds_operation_factors(sdxl):
+    sdxl = dataclasses.replace(sdxl, est_seconds_per_step=0.5)
+    edit = dataclasses.replace(sdxl.operations["edit"], est_factor=1.2, est_extra_s=2.0)
+    sdxl = dataclasses.replace(sdxl, operations={**sdxl.operations, "edit": edit})
+    p = _params(operation="edit", image="openai-api/x", n=2, steps=10)
+    est = estimate_seconds(sdxl, p, last_checkpoint=sdxl.checkpoint, overhead_s=3.0)
+    assert est == pytest.approx(3.0 + 10 * 0.5 * 1.0 * 2 * 1.2 + 2.0)
+
+
+def test_registry_without_operations_still_loads(tmp_path):
+    d = _copy_workflows(tmp_path)
+    _edit_registry(d, lambda m: m.pop("operations"))
+    sdxl = Registry.load(d).get("sdxl")
+    assert sdxl.operations == {} and sdxl.operation("edit") is None
+    assert sdxl.operation("generate") is not None
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda m: m.__setitem__("operations", []), "operations must be an object"),
+        (lambda m: m["operations"].__setitem__("upscale", {}), "unknown operation"),
+        (lambda m: m["operations"].__setitem__("generate", {}), "unknown operation"),
+        (lambda m: m["operations"].__setitem__("edit", "x.json"), "must be an object"),
+        (lambda m: m["operations"]["edit"].pop("bindings"), "missing field 'bindings'"),
+        (lambda m: m["operations"]["edit"].__setitem__("bindings", []), "must be an object"),
+        (lambda m: m["operations"]["edit"]["bindings"].pop("image"), "missing required"),
+        (lambda m: m["operations"]["edit_masked"]["bindings"].pop("mask"), "missing required"),
+        (
+            lambda m: m["operations"]["edit"]["bindings"].__setitem__("image", ["99", "image"]),
+            "missing node '99'",
+        ),
+        (lambda m: m["operations"]["variation"].__setitem__("output_node", "77"), "output_node"),
+        (lambda m: m["operations"]["edit"].__setitem__("workflow", "nope.json"), "not found"),
+        (lambda m: m.__setitem__("defaults", []), "defaults must be an object"),
+        (lambda m: m["operations"]["edit"].__setitem__("defaults", 1), "must be an object"),
+        (lambda m: m["operations"]["edit"]["defaults"].__setitem__("denoise", 0), "denoise"),
+        (lambda m: m["operations"]["edit"]["defaults"].__setitem__("denoise", 1.5), "denoise"),
+        (lambda m: m["operations"]["edit"]["defaults"].__setitem__("denoise", "x"), "denoise"),
+        (lambda m: m["operations"]["edit"]["defaults"].__setitem__("denoise", True), "denoise"),
+    ],
+)
+def test_operation_validation_errors(tmp_path, mutate, match):
+    d = _copy_workflows(tmp_path)
+    _edit_registry(d, mutate)
+    with pytest.raises(WorkflowError, match=match):
+        Registry.load(d)
+
+
+def test_denoise_default_of_one_accepted(tmp_path):
+    d = _copy_workflows(tmp_path)
+    _edit_registry(d, lambda m: m["operations"]["edit"]["defaults"].__setitem__("denoise", 1))
+    assert Registry.load(d).get("sdxl").operations["edit"].defaults["denoise"] == 1
+
+
+def test_operation_checkpoint_must_match_required(tmp_path):
+    d = _copy_workflows(tmp_path)
+    path = d / "sdxl_inpaint.json"
+    graph = json.loads(path.read_text())
+    loader = next(n for n in graph.values() if n["class_type"] == "CheckpointLoaderSimple")
+    loader["inputs"]["ckpt_name"] = "other_model.safetensors"
+    path.write_text(json.dumps(graph))
+    with pytest.raises(WorkflowError, match="edit_masked.*other_model.safetensors"):
+        Registry.load(d)
+    _edit_registry(d, lambda m: m.__setitem__("required_files", []))  # nothing to compare
+    assert Registry.load(d).get("sdxl").operations["edit_masked"] is not None

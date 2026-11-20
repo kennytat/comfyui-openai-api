@@ -29,7 +29,7 @@ def clock() -> FakeClock:
 def fake(tmp_path: Path) -> FakeComfy:
     out = tmp_path / "comfy-output"
     out.mkdir()
-    return FakeComfy(out)
+    return FakeComfy(out, tmp_path / "comfy-input")
 
 
 @pytest.fixture

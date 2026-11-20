@@ -10,12 +10,21 @@
 
 The registry is loaded (and validated) at creation, so a broken workflow fails fast. The
 lifespan never waits on ComfyUI: it starts the FIFO worker, the external-queue poller, the
-TTL and orphan sweepers and spawns ``reconcile_startup`` as a background task, so
-``/healthz`` answers while ComfyUI is down or still booting.
+TTL and orphan sweepers (ComfyUI output mount: ``ORPHAN_MAX_AGE_S``; input mount:
+``INPUT_ORPHAN_MAX_AGE_S``, swept at least that often) and spawns ``reconcile_startup``
+as a background task, so ``/healthz`` answers while ComfyUI is down or still booting.
 
 ``BodySizeLimitMiddleware`` is raw ASGI: it rejects a too-large ``Content-Length`` up front
 and counts the bytes actually delivered by ``receive()``, so chunked bodies without a
-length are cut at ``MAX_BODY_BYTES`` as well (413 ``request_too_large``).
+length are cut at ``MAX_BODY_BYTES`` as well (413 ``request_too_large``). The multipart
+routes (``/v1/images/edits``, ``/v1/images/variations``) get ``MAX_MULTIPART_BYTES``
+instead; the per-file ``MAX_UPLOAD_BYTES`` is enforced by the route's parser. The path is
+matched with ``root_path`` stripped and trailing slashes removed.
+
+``create_app`` also sets Pillow's process-global decompression-bomb limit once
+(``configure_pillow``), the preprocessing semaphore (``app.state.preprocess_sem``,
+``MAX_CONCURRENT_PREPROCESS``) and the set of tracked background tasks
+(``app.state.background_tasks``, cancelled on shutdown).
 
 The module attribute ``app`` (for ``uvicorn app.main:app``) is built lazily on first access.
 """
@@ -36,19 +45,21 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.comfy.client import ComfyClient
-from app.comfy.workflows import Registry
+from app.comfy.workflows import Registry, parse_size
 from app.config import Settings, load_settings
 from app.errors import install_error_handlers, request_too_large
 from app.queue import JobQueue
 from app.routes import files, health, images, models
 from app.routes.models import ModelCatalog
 from app.storage import ImageStore, run_orphan_sweeper, run_ttl_sweeper
+from app.uploads import configure_pillow
 
 log = logging.getLogger("gateway")
 
 TTL_SWEEP_INTERVAL_S = 60.0
 ORPHAN_SWEEP_INTERVAL_S = 600.0
 DISCONNECT_POLL_S = 1.0
+INPUT_RETRY_DELAY_S = 2.0
 
 
 def default_workflows_dir() -> Path:
@@ -61,24 +72,36 @@ class _BodyTooLarge(StarletteHTTPException):
         super().__init__(status_code=413)
 
 
+def _route_path(scope: Scope) -> str:
+    path: str = scope.get("path", "")
+    root = scope.get("root_path", "").rstrip("/")
+    if root and (path == root or path.startswith(root + "/")):
+        path = path[len(root) :]
+    return path.rstrip("/") or "/"
+
+
 class BodySizeLimitMiddleware:
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+    def __init__(
+        self, app: ASGIApp, max_bytes: int, path_limits: dict[str, int] | None = None
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.path_limits = {p.rstrip("/") or "/": v for p, v in (path_limits or {}).items()}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         scope.setdefault("state", {})["t0"] = time.monotonic()
+        limit = self.path_limits.get(_route_path(scope), self.max_bytes)
         for name, value in scope.get("headers", []):
             if name == b"content-length":
                 try:
-                    too_big = int(value) > self.max_bytes
+                    too_big = int(value) > limit
                 except ValueError:
                     too_big = False
                 if too_big:
-                    await request_too_large(self.max_bytes).response()(scope, receive, send)
+                    await request_too_large(limit).response()(scope, receive, send)
                     return
 
         received = 0
@@ -90,7 +113,7 @@ class BodySizeLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > limit:
                     exceeded = True
                     raise _BodyTooLarge()
             return message
@@ -108,7 +131,7 @@ class BodySizeLimitMiddleware:
             if not exceeded:
                 raise
         if exceeded and not started:
-            await request_too_large(self.max_bytes).response()(scope, receive, send)
+            await request_too_large(limit).response()(scope, receive, send)
 
 
 def _configure_logging(level: str) -> None:
@@ -137,6 +160,7 @@ def create_app(
             transport=comfy_transport,
             poll_interval_s=settings.poll_interval_s,
             output_subfolder=settings.comfy_output_subfolder,
+            input_subfolder=settings.comfy_input_subfolder,
         )
         queue = JobQueue(settings, client)
         app.state.client = client
@@ -158,24 +182,27 @@ def create_app(
             ),
             asyncio.create_task(client.reconcile_startup(), name="startup-reconcile"),
         ]
+        # (dir, max age, interval); uploaded user images: always swept, and soon
+        input_age = settings.input_orphan_max_age_s
+        sweeps = [(settings.comfy_input_dir, input_age, min(ORPHAN_SWEEP_INTERVAL_S, input_age))]
         if settings.cleanup_comfy_outputs:
+            sweeps.insert(
+                0, (settings.comfy_output_dir, settings.orphan_max_age_s, ORPHAN_SWEEP_INTERVAL_S)
+            )
+        for sweep_dir, max_age, interval in sweeps:
             tasks.append(
                 asyncio.create_task(
-                    run_orphan_sweeper(
-                        settings.comfy_output_dir,
-                        settings.orphan_max_age_s,
-                        ORPHAN_SWEEP_INTERVAL_S,
-                        clock,
-                    ),
-                    name="orphan-sweeper",
+                    run_orphan_sweeper(sweep_dir, max_age, interval, clock),
+                    name=f"orphan-sweeper:{sweep_dir}",
                 )
             )
         try:
             yield
         finally:
-            for task in tasks:
+            background = list(app.state.background_tasks)
+            for task in [*tasks, *background]:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*tasks, *background, return_exceptions=True)
             await client.aclose()
 
     app = FastAPI(
@@ -189,12 +216,26 @@ def create_app(
     app.state.registry = registry
     app.state.clock = clock
     app.state.disconnect_poll_s = DISCONNECT_POLL_S
+    app.state.input_retry_delay_s = INPUT_RETRY_DELAY_S
+    app.state.background_tasks = set()
+    app.state.preprocess_sem = asyncio.Semaphore(settings.max_concurrent_preprocess)
+    # Process-global, set once (thread-safe); the per-upload header check stays authoritative.
+    # Never below the largest output size, which the encoder re-opens with Pillow too.
+    largest_output = max(
+        (w * h for m in registry.models for w, h in map(parse_size, m.sizes) if w and h),
+        default=0,
+    )
+    configure_pillow(max(settings.max_input_pixels, largest_output))
     install_error_handlers(app)
     app.include_router(images.router)
     app.include_router(models.router)
     app.include_router(files.router)
     app.include_router(health.router)
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=settings.max_body_bytes,
+        path_limits={path: settings.max_multipart_bytes for path in images.MULTIPART_PATHS},
+    )
     return app
 
 

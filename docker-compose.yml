@@ -40,14 +40,16 @@ services:
     build: ./gateway
     restart: unless-stopped
     user: "0:0"
-    # Root only for file ownership on the two bind mounts (plan D5); everything else dropped.
-    # Writable paths: /data/images and /comfy-output (volumes) and /tmp (tmpfs); the image
+    # Root only for file ownership on the bind mounts (plan D5); everything else dropped.
+    # Writable paths: /data/images, /comfy-output, /comfy-input (volumes) and /tmp (tmpfs); the image
     # sets PYTHONDONTWRITEBYTECODE so nothing else is written.
     cap_drop: [ALL]
     cap_add: [DAC_OVERRIDE, FOWNER]
     security_opt: ["no-new-privileges:true"]
     read_only: true
     tmpfs: [/tmp]
+    # Bounds Pillow preprocessing of uploads (MAX_INPUT_PIXELS x MAX_CONCURRENT_PREPROCESS).
+    mem_limit: 2g
     depends_on:
       comfyui:
         condition: service_started
@@ -62,6 +64,11 @@ services:
       MAX_N: ${MAX_N:-4}
       MAX_PROMPT_CHARS: ${MAX_PROMPT_CHARS:-4000}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-4194304}
+      MAX_MULTIPART_BYTES: ${MAX_MULTIPART_BYTES:-0}
+      MAX_INPUT_PIXELS: ${MAX_INPUT_PIXELS:-16777216}
+      MAX_CONCURRENT_PREPROCESS: ${MAX_CONCURRENT_PREPROCESS:-2}
+      UPLOAD_WAIT_S: ${UPLOAD_WAIT_S:-15}
       QUEUE_MAX_DEPTH: ${QUEUE_MAX_DEPTH:-8}
       REQUEST_TIMEOUT_S: ${REQUEST_TIMEOUT_S:-90}
       POSTPROCESS_RESERVE_S: ${POSTPROCESS_RESERVE_S:-10}
@@ -73,8 +80,11 @@ services:
       IMAGE_URL_TTL_S: ${IMAGE_URL_TTL_S:-3600}
       COMFY_OUTPUT_DIR: /comfy-output
       COMFY_OUTPUT_SUBFOLDER: openai-api
+      COMFY_INPUT_DIR: /comfy-input
+      COMFY_INPUT_SUBFOLDER: openai-api
       CLEANUP_COMFY_OUTPUTS: ${CLEANUP_COMFY_OUTPUTS:-true}
       ORPHAN_MAX_AGE_S: ${ORPHAN_MAX_AGE_S:-3600}
+      INPUT_ORPHAN_MAX_AGE_S: ${INPUT_ORPHAN_MAX_AGE_S:-300}
       MODEL_CHECK_TTL_S: ${MODEL_CHECK_TTL_S:-60}
       MODEL_REFRESH_MIN_INTERVAL_S: ${MODEL_REFRESH_MIN_INTERVAL_S:-5}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -82,8 +92,9 @@ services:
       - "127.0.0.1:${GATEWAY_PORT:-8001}:8000"
     volumes:
       - ./gateway-data/images:/data/images
-      # Only the openai-api subfolder, never the whole ComfyUI output dir.
+      # Only the openai-api subfolders, never the whole ComfyUI output/input dirs.
       - ./comfyui/storage-user/output/openai-api:/comfy-output
+      - ./comfyui/storage-user/input/openai-api:/comfy-input
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 15s

@@ -18,7 +18,7 @@ mkdir -p \
   comfyui/storage-models/models/vae \
   comfyui/storage-models/hf-hub \
   comfyui/storage-models/torch-hub \
-  comfyui/storage-user/input \
+  comfyui/storage-user/input/openai-api \
   comfyui/storage-user/output/openai-api \
   comfyui/storage-user/user-profile \
   comfyui/storage-user/user-scripts \

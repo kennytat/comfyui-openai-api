@@ -152,3 +152,33 @@ def test_numeric_range_checks(sdxl_graph, object_info):
 def test_validate_non_api_graph(object_info):
     assert validate_graph({}, object_info)
     assert validate_graph({"1": {"inputs": {}}}, object_info)
+
+
+@pytest.mark.parametrize("operation", ["edit", "edit_masked", "variation"])
+def test_img2img_workflows_validate_against_fixture(object_info, operation):
+    sdxl = Registry.load(Path(__file__).resolve().parents[1] / "workflows").get("sdxl")
+    op = sdxl.operation(operation)
+    graph = build_prompt(
+        sdxl,
+        GenerationParams(
+            prompt="x",
+            width=1024,
+            height=1024,
+            n=2,
+            seed=1,
+            operation=operation,
+            image="openai-api/j_image.png",
+            mask="openai-api/j_mask.png",
+        ),
+    )
+    # uploaded names are not in the static LoadImage combo list
+    assert any("not in allowed options" in e for e in validate_graph(graph, object_info))
+    assert validate_graph(graph, object_info, skip_combo=op.upload_inputs()) == []
+    broken = json.loads(json.dumps(graph))
+    if operation == "edit_masked":
+        broken["13"]["inputs"]["channel"] = "luma"
+        errors = validate_graph(broken, object_info, skip_combo=op.upload_inputs())
+        assert any("channel" in e for e in errors)
+    broken["12"]["inputs"]["amount"] = 65
+    errors = validate_graph(broken, object_info, skip_combo=op.upload_inputs())
+    assert any("> max 64" in e for e in errors)
