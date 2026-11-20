@@ -1,0 +1,27 @@
+{
+  "11111111-1111-4111-8111-111111111111": {
+    "prompt": [0, "11111111-1111-4111-8111-111111111111", {}, {"client_id": "openai-api-00000000-0000-4000-8000-000000000000"}, ["9"]],
+    "outputs": {},
+    "status": {
+      "status_str": "error",
+      "completed": false,
+      "messages": [
+        ["execution_start", {"prompt_id": "11111111-1111-4111-8111-111111111111", "timestamp": 1763400000000}],
+        ["execution_cached", {"nodes": [], "prompt_id": "11111111-1111-4111-8111-111111111111", "timestamp": 1763400000005}],
+        ["execution_error", {
+          "prompt_id": "11111111-1111-4111-8111-111111111111",
+          "node_id": "3",
+          "node_type": "KSampler",
+          "executed": ["4", "5", "6", "7"],
+          "exception_message": "Expected all tensors to be on the same device",
+          "exception_type": "RuntimeError",
+          "traceback": ["Traceback (most recent call last):\n", "RuntimeError: Expected all tensors to be on the same device\n"],
+          "current_inputs": {},
+          "current_outputs": {},
+          "timestamp": 1763400003000
+        }]
+      ]
+    },
+    "meta": {}
+  }
+}

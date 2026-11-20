@@ -1,0 +1,123 @@
+{
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 0,
+      "steps": 25,
+      "cfg": 7.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 1.0,
+      "model": ["15", 0],
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "latent_image": ["12", 0]
+    },
+    "_meta": {"title": "KSampler"}
+  },
+  "4": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"
+    },
+    "_meta": {"title": "Load Checkpoint"}
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["4", 1]
+    },
+    "_meta": {"title": "Positive Prompt"}
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["4", 1]
+    },
+    "_meta": {"title": "Negative Prompt"}
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["4", 2]
+    },
+    "_meta": {"title": "VAE Decode"}
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "openai-api/check",
+      "images": ["17", 0]
+    },
+    "_meta": {"title": "Save Image"}
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {"title": "Load Image"}
+  },
+  "11": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": ["10", 0],
+      "vae": ["4", 2]
+    },
+    "_meta": {"title": "VAE Encode"}
+  },
+  "12": {
+    "class_type": "RepeatLatentBatch",
+    "inputs": {
+      "samples": ["14", 0],
+      "amount": 1
+    },
+    "_meta": {"title": "Repeat Latent Batch"}
+  },
+  "13": {
+    "class_type": "LoadImageMask",
+    "inputs": {
+      "image": "example.png",
+      "channel": "alpha"
+    },
+    "_meta": {"title": "Load Mask (alpha: transparent = edit; feathered by the gateway)"}
+  },
+  "14": {
+    "class_type": "SetLatentNoiseMask",
+    "inputs": {
+      "samples": ["11", 0],
+      "mask": ["13", 0]
+    },
+    "_meta": {"title": "Set Latent Noise Mask"}
+  },
+  "15": {
+    "class_type": "DifferentialDiffusion",
+    "inputs": {
+      "model": ["4", 0],
+      "strength": 1.0
+    },
+    "_meta": {"title": "Differential Diffusion (soft mask -> gradual denoise)"}
+  },
+  "16": {
+    "class_type": "InvertMask",
+    "inputs": {
+      "mask": ["13", 0]
+    },
+    "_meta": {"title": "Invert Mask (1 = keep original)"}
+  },
+  "17": {
+    "class_type": "ImageCompositeMasked",
+    "inputs": {
+      "destination": ["8", 0],
+      "source": ["10", 0],
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "mask": ["16", 0]
+    },
+    "_meta": {"title": "Composite original back outside the mask (batch-safe: source repeats to n)"}
+  }
+}

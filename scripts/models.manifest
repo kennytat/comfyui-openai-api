@@ -1,0 +1,13 @@
+# model_id  hf_repo  hf_file  dest_relpath  sha256
+# sha256 "-" means: skip verification (an existing file is treated as present).
+# Fill in a real hash to enable verification and re-download on mismatch.
+# Hashes are Hugging Face's LFS sha256 (the `x-linked-etag` header of a HEAD on the resolve URL).
+sdxl          stabilityai/stable-diffusion-xl-base-1.0  sd_xl_base_1.0.safetensors            comfyui/storage-models/models/checkpoints/sd_xl_base_1.0.safetensors            31e35c80fc4829d14f90153f4c74cd59c90b779f6afe05a74cd6120b893f7e5b
+sdxl-vae      madebyollin/sdxl-vae-fp16-fix             sdxl_vae.safetensors                  comfyui/storage-models/models/vae/sdxl_vae_fp16_fix.safetensors                 235745af8d86bf4a4c1b5b4f529868b37019a10f7c0b2e79ad0abca3a22bc6e1
+sd15          Comfy-Org/stable-diffusion-v1-5-archive   v1-5-pruned-emaonly-fp16.safetensors  comfyui/storage-models/models/checkpoints/v1-5-pruned-emaonly-fp16.safetensors  e9476a13728cd75d8279f6ec8bad753a66a1957ca375a1464dc63b37db6e3916
+flux-schnell  Comfy-Org/flux1-schnell                   flux1-schnell-fp8.safetensors         comfyui/storage-models/models/checkpoints/flux1-schnell-fp8.safetensors         ead426278b49030e9da5df862994f25ce94ab2ee4df38b556ddddb3db093bf72
+flux-dev      Comfy-Org/Flux-1-Dev                      flux1-dev-fp8.safetensors             comfyui/storage-models/models/checkpoints/flux1-dev-fp8.safetensors             8e91b68084b53a7fc44ed2a3756d821e355ac1a7b6fe29be760c1db532f3d88a
+qwen-image            Comfy-Org/Qwen-Image             split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors        comfyui/storage-models/models/diffusion_models/qwen_image_fp8_e4m3fn.safetensors   98763a127701eb6fb59096f7742cb3aa7d64ed510b9f4e882d8351f8176e3ce3
+qwen-image-te         Comfy-Org/Qwen-Image             split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors       comfyui/storage-models/models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors  cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4
+qwen-image-vae        Comfy-Org/Qwen-Image             split_files/vae/qwen_image_vae.safetensors                            comfyui/storage-models/models/vae/qwen_image_vae.safetensors                       a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f
+qwen-image-lightning  lightx2v/Qwen-Image-Lightning    Qwen-Image-Lightning-8steps-V1.1.safetensors                          comfyui/storage-models/models/loras/Qwen-Image-Lightning-8steps-V1.1.safetensors   c5f33b60c0e3308b7c7688f5180457dfabbc09e4f4a4c4801d780d79b706a508

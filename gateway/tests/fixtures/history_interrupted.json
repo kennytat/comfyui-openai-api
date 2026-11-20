@@ -1,0 +1,21 @@
+{
+  "11111111-1111-4111-8111-111111111111": {
+    "prompt": [0, "11111111-1111-4111-8111-111111111111", {}, {"client_id": "openai-api-00000000-0000-4000-8000-000000000000"}, ["9"]],
+    "outputs": {},
+    "status": {
+      "status_str": "error",
+      "completed": false,
+      "messages": [
+        ["execution_start", {"prompt_id": "11111111-1111-4111-8111-111111111111", "timestamp": 1763400000000}],
+        ["execution_interrupted", {
+          "prompt_id": "11111111-1111-4111-8111-111111111111",
+          "node_id": "3",
+          "node_type": "KSampler",
+          "executed": ["4", "5", "6", "7"],
+          "timestamp": 1763400005000
+        }]
+      ]
+    },
+    "meta": {}
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 0,
+      "steps": 12,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 0.7,
+      "model": ["4", 0],
+      "positive": ["20", 0],
+      "negative": ["7", 0],
+      "latent_image": ["12", 0]
+    },
+    "_meta": {"title": "KSampler"}
+  },
+  "4": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "flux1-dev-fp8.safetensors"
+    },
+    "_meta": {"title": "Load Checkpoint"}
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["4", 1]
+    },
+    "_meta": {"title": "Positive Prompt"}
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["4", 1]
+    },
+    "_meta": {"title": "Negative Prompt (unused: cfg 1.0 ignores it)"}
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["4", 2]
+    },
+    "_meta": {"title": "VAE Decode"}
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "openai-api/check",
+      "images": ["8", 0]
+    },
+    "_meta": {"title": "Save Image"}
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {"title": "Load Image"}
+  },
+  "11": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": ["10", 0],
+      "vae": ["4", 2]
+    },
+    "_meta": {"title": "VAE Encode"}
+  },
+  "12": {
+    "class_type": "RepeatLatentBatch",
+    "inputs": {
+      "samples": ["11", 0],
+      "amount": 1
+    },
+    "_meta": {"title": "Repeat Latent Batch"}
+  },
+  "20": {
+    "class_type": "FluxGuidance",
+    "inputs": {
+      "conditioning": ["6", 0],
+      "guidance": 3.5
+    },
+    "_meta": {"title": "Flux guidance (distilled; bound to cfg_scale)"}
+  }
+}
