@@ -27,7 +27,7 @@ class ImageOptions(BaseModel):
     output_compression: int | None = Field(default=None, ge=0, le=100)
     background: Literal["auto", "opaque", "transparent"] | None = None
     stream: bool | None = None
-    partial_images: int | None = Field(default=None, ge=0)
+    partial_images: int | None = Field(default=None, ge=0, le=3)
     style: str | None = None
     user: str | None = None
     moderation: str | None = None
@@ -42,20 +42,6 @@ class ImageOptions(BaseModel):
     def _background(cls, v: str | None) -> str | None:
         if v == "transparent":
             raise unsupported_value("Transparent backgrounds are not supported.", "background")
-        return v
-
-    @field_validator("stream")
-    @classmethod
-    def _stream(cls, v: bool | None) -> bool | None:
-        if v:
-            raise unsupported_value("Streaming is not supported.", "stream")
-        return v
-
-    @field_validator("partial_images")
-    @classmethod
-    def _partial(cls, v: int | None) -> int | None:
-        if v:
-            raise unsupported_value("partial_images is not supported.", "partial_images")
         return v
 
     def check_limits(self, max_prompt_chars: int, max_n: int) -> None:
@@ -84,9 +70,23 @@ class ImageEditRequest(ImageGenerationRequest):
 
 
 class ImageVariationRequest(ImageOptions):
-    """Multipart text fields of ``/v1/images/variations``."""
+    """Multipart text fields of ``/v1/images/variations`` (no streaming, like OpenAI)."""
 
     strength: float | None = Field(default=None, ge=0.05, le=1.0)
+
+    @field_validator("stream")
+    @classmethod
+    def _stream(cls, v: bool | None) -> bool | None:
+        if v:
+            raise unsupported_value("Variations do not support streaming.", "stream")
+        return v
+
+    @field_validator("partial_images")
+    @classmethod
+    def _partial(cls, v: int | None) -> int | None:
+        if v:
+            raise unsupported_value("Variations do not support partial_images.", "partial_images")
+        return v
 
 
 class ImageData(BaseModel):

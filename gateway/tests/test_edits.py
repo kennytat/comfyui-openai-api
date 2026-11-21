@@ -344,8 +344,7 @@ async def test_edits_require_auth(gw):
 @pytest.mark.parametrize(
     "fields,param",
     [
-        ({"stream": "true"}, "stream"),
-        ({"partial_images": "2"}, "partial_images"),
+        ({"stream": "true", "response_format": "url"}, "response_format"),
         ({"background": "transparent"}, "background"),
     ],
 )

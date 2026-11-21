@@ -116,6 +116,16 @@ def queue_full(
     )
 
 
+def rate_limit_exceeded(retry_after_s: float) -> OpenAIError:
+    return OpenAIError(
+        429,
+        "Rate limit reached for this API key. Try again later.",
+        RATE_LIMIT,
+        "rate_limit_exceeded",
+        headers=_retry_after(retry_after_s),
+    )
+
+
 def estimated_wait_exceeded(retry_after_s: float) -> OpenAIError:
     return OpenAIError(
         429,
@@ -171,8 +181,15 @@ def _param_from_loc(loc: tuple[Any, ...] | list[Any]) -> str | None:
     return ".".join(parts) or None
 
 
+def _respond(request: Request, err: OpenAIError) -> JSONResponse:
+    metrics = getattr(request.app.state, "metrics", None)
+    if metrics is not None:
+        metrics.error(err.status, err.code)
+    return err.response()
+
+
 async def _openai_error_handler(request: Request, exc: OpenAIError) -> JSONResponse:
-    return exc.response()
+    return _respond(request, exc)
 
 
 async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -189,7 +206,7 @@ async def _validation_handler(request: Request, exc: RequestValidationError) -> 
         msg = first.get("msg", "Invalid value")
         message = f"Invalid '{param}': {msg}." if param else f"Invalid request: {msg}."
         code = "invalid_value"
-    return OpenAIError(400, message, INVALID_REQUEST, code, param).response()
+    return _respond(request, OpenAIError(400, message, INVALID_REQUEST, code, param))
 
 
 async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -203,12 +220,12 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
     else:
         code, message = "http_error", detail
     etype = SERVER_ERROR if status >= 500 else INVALID_REQUEST
-    return OpenAIError(status, message, etype, code, headers=headers).response()
+    return _respond(request, OpenAIError(status, message, etype, code, headers=headers))
 
 
 async def _unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
     log.error("unhandled exception on %s %s", request.method, request.url.path, exc_info=exc)
-    return internal_error().response()
+    return _respond(request, internal_error())
 
 
 def install_error_handlers(app: FastAPI) -> None:

@@ -40,6 +40,25 @@ class Settings(BaseSettings):
     postprocess_reserve_s: float = 10.0
     est_job_overhead_s: float = 3.0
     est_external_job_s: float = 30.0
+    # Learned per-model correction of the sampling estimate (EWMA of measured/estimated
+    # GPU time on warm successful jobs), applied as mean + mean deviation, clamped.
+    est_autocalibrate: bool = True
+    est_ewma_alpha: float = 0.2
+    est_scale_min: float = 0.75
+    est_scale_max: float = 1.5
+    est_calibration_min_samples: int = 3
+    # Per-API-key token bucket on the image endpoints; 0 disables. Burst 0 -> max(1, rpm).
+    rate_limit_rpm: float = 0.0
+    rate_limit_burst: int = 0
+    # Prometheus text exposition at GET /metrics (Bearer API key required).
+    enable_metrics: bool = True
+    # ComfyUI WebSocket: instant completion wake-ups, progress and previews (polling stays
+    # the fallback).
+    comfy_ws: bool = True
+    # stream=true requests: SSE keeps the connection alive (comment every
+    # STREAM_KEEPALIVE_S), so they may run longer than REQUEST_TIMEOUT_S.
+    stream_timeout_s: float = 300.0
+    stream_keepalive_s: float = 15.0
     poll_interval_s: float = 0.5
     comfy_queue_poll_s: float = 2.0
     image_store_dir: str = "/data/images"
@@ -79,6 +98,18 @@ class Settings(BaseSettings):
             raise ValueError("MAX_CONCURRENT_PREPROCESS must be >= 1")
         if self.upload_wait_s <= 0 or self.input_orphan_max_age_s <= 0:
             raise ValueError("UPLOAD_WAIT_S and INPUT_ORPHAN_MAX_AGE_S must be positive")
+        if not 0 < self.est_ewma_alpha <= 1:
+            raise ValueError("EST_EWMA_ALPHA must be in (0, 1]")
+        if not 0 < self.est_scale_min <= 1 <= self.est_scale_max:
+            raise ValueError("need 0 < EST_SCALE_MIN <= 1 <= EST_SCALE_MAX")
+        if self.est_calibration_min_samples < 1:
+            raise ValueError("EST_CALIBRATION_MIN_SAMPLES must be >= 1")
+        if not self.request_timeout_s <= self.stream_timeout_s <= 3600:
+            raise ValueError("STREAM_TIMEOUT_S must be between REQUEST_TIMEOUT_S and 3600")
+        if not 0 < self.stream_keepalive_s < 100:
+            raise ValueError("STREAM_KEEPALIVE_S must be in (0, 100)")
+        if self.rate_limit_rpm < 0 or self.rate_limit_burst < 0:
+            raise ValueError("RATE_LIMIT_RPM and RATE_LIMIT_BURST must be >= 0")
         if self.max_multipart_bytes <= 0:
             self.max_multipart_bytes = 2 * self.max_upload_bytes + 64 * 1024
         if self.max_multipart_bytes < self.max_upload_bytes:
@@ -91,6 +122,10 @@ class Settings(BaseSettings):
     @property
     def generation_budget_s(self) -> float:
         return self.request_timeout_s - self.postprocess_reserve_s
+
+    @property
+    def stream_budget_s(self) -> float:
+        return self.stream_timeout_s - self.postprocess_reserve_s
 
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})

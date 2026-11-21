@@ -36,7 +36,10 @@ input_subfolder="openai-api")``:
 - ``await upload_image(data, filename, subfolder=None, type="input", overwrite=True)
   -> str``: ``POST /upload/image`` (multipart); returns the ComfyUI input name
   ``"<subfolder>/<name>"`` to put into ``LoadImage.image`` / ``LoadImageMask.image``.
-- ``await submit(graph, client_id=None) -> prompt_id``
+- ``await submit(graph, client_id=None, extra_data=None) -> prompt_id`` (``extra_data``
+  e.g. ``{"preview_method": "auto"}`` for latent previews over the WebSocket)
+- ``notify(prompt_id, started=False)``: called by ``ComfyEvents`` (WebSocket); wakes the
+  prompt's poll loop right away (``started=True`` records the WebSocket start time).
 - ``await wait_for(prompt_id, deadline_monotonic=None) -> WaitResult``; raises
   ``TimeoutError`` once ``time.monotonic()`` passes the deadline, including while a
   ``/history`` or ``/queue`` poll is still in flight. A prompt missing from both ``/queue``
@@ -57,6 +60,7 @@ input_subfolder="openai-api")``:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -276,6 +280,8 @@ class ComfyClient:
             base_url=self.base_url, transport=transport, timeout=request_timeout_s
         )
         self._submitted_at: dict[str, float] = {}
+        self._wakeups: dict[str, asyncio.Event] = {}
+        self._ws_started_at: dict[str, float] = {}
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -338,8 +344,15 @@ class ComfyClient:
 
     # ------------------------------------------------------------------ submit
 
-    async def submit(self, graph: Mapping[str, Any], client_id: str | None = None) -> str:
-        body = {"prompt": graph, "client_id": client_id or self.client_id}
+    async def submit(
+        self,
+        graph: Mapping[str, Any],
+        client_id: str | None = None,
+        extra_data: Mapping[str, Any] | None = None,
+    ) -> str:
+        body: dict[str, Any] = {"prompt": graph, "client_id": client_id or self.client_id}
+        if extra_data:
+            body["extra_data"] = dict(extra_data)
         resp = await self._request("POST", "/prompt", json=body)
         try:
             data = resp.json()
@@ -453,10 +466,14 @@ class ComfyClient:
     ) -> WaitResult:
         started_at: float | None = None
         missing_polls = 0
+        wake = self._wakeups.setdefault(prompt_id, asyncio.Event())
         while True:
+            wake.clear()
             if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 raise TimeoutError(f"deadline exceeded waiting for prompt {prompt_id}")
             entry = await self.get_history(prompt_id)
+            if started_at is None and prompt_id in self._ws_started_at:
+                started_at = self._ws_started_at[prompt_id]
             if entry is not None:
                 self._raise_for_history(prompt_id, entry)
                 return WaitResult(
@@ -483,7 +500,9 @@ class ComfyClient:
             delay = self.poll_interval_s
             if deadline_monotonic is not None:
                 delay = min(delay, max(0.0, deadline_monotonic - time.monotonic()))
-            await asyncio.sleep(delay)
+            with contextlib.suppress(TimeoutError):  # a WebSocket event ends the wait early
+                async with asyncio.timeout(delay):
+                    await wake.wait()
 
     # ------------------------------------------------------------------ outputs
 
@@ -558,8 +577,17 @@ class ComfyClient:
         await self._json_ok("POST", "/history", json={"delete": [prompt_id]})
         self.forget(prompt_id)
 
+    def notify(self, prompt_id: str, started: bool = False) -> None:
+        if started:
+            self._ws_started_at.setdefault(prompt_id, time.monotonic())
+        wake = self._wakeups.get(prompt_id)
+        if wake is not None:
+            wake.set()
+
     def forget(self, prompt_id: str) -> None:
         self._submitted_at.pop(prompt_id, None)
+        self._wakeups.pop(prompt_id, None)
+        self._ws_started_at.pop(prompt_id, None)
 
     async def reconcile_startup(self) -> ReconcileReport:
         """Remove prompts left by previous gateway boots. Best effort; never raises."""

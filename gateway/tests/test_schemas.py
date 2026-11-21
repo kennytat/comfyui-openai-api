@@ -46,8 +46,6 @@ def test_validation_errors(kw):
     "kw,param",
     [
         ({"background": "transparent"}, "background"),
-        ({"stream": True}, "stream"),
-        ({"partial_images": 2}, "partial_images"),
     ],
 )
 def test_unsupported(kw, param):
@@ -106,3 +104,16 @@ def test_response_models():
     m = ModelList(data=[Model(id="sdxl", created=1)]).model_dump()
     assert m["object"] == "list" and m["data"][0]["object"] == "model"
     assert m["data"][0]["owned_by"] == "comfyui-openai-api"
+
+
+def test_stream_accepted_for_generations_not_variations():
+    from app.schemas import ImageVariationRequest
+
+    r = req(stream=True, partial_images=3)
+    assert r.stream is True and r.partial_images == 3
+    with pytest.raises(ValidationError):
+        req(stream=True, partial_images=4)
+    for kw, param in (({"stream": True}, "stream"), ({"partial_images": 1}, "partial_images")):
+        with pytest.raises(OpenAIError) as ei:
+            ImageVariationRequest(**kw)
+        assert ei.value.code == "unsupported_value" and ei.value.param == param

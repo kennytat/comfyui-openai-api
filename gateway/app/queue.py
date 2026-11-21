@@ -40,7 +40,14 @@ Public API:
     ``/prompt`` is bounded by the job's generation deadline; after a submit timeout or
     transport error one ``/queue`` snapshot is taken and owned prompts no job tracks
     (orphans accepted after we stopped waiting) are cancelled.
-  - ``snapshot() -> dict`` for ``/readyz``.
+  - ``snapshot() -> dict`` for ``/readyz`` (includes the calibration per model).
+- ``EstimateCalibrator(alpha, scale_min, scale_max, min_samples)``: per-model EWMA of
+  ``measured / estimated`` sampling time (``gpu_s - est_extra_s`` over ``compute_seconds``)
+  and of its absolute deviation, fed by warm successful jobs (the model's weights were
+  already the last ones submitted). ``scale(model_id)`` is ``1.0`` until ``min_samples``
+  observations, then ``clamp(mean + deviation, scale_min, scale_max)``: biased upward so
+  estimates stay at or above typical real times. ``JobQueue`` applies it to every estimate
+  when ``EST_AUTOCALIBRATE`` is on. Observations are kept in memory only (reset on restart).
 """
 
 from __future__ import annotations
@@ -55,7 +62,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.comfy.client import ComfyClient, ComfyError, UpstreamUnavailable, WaitResult
-from app.comfy.workflows import GenerationParams, ModelEntry, estimate_seconds
+from app.comfy.workflows import (
+    GenerationParams,
+    ModelEntry,
+    compute_seconds,
+    estimate_seconds,
+)
 from app.config import Settings
 from app.errors import estimated_wait_exceeded, queue_full, request_too_expensive
 
@@ -89,6 +101,9 @@ class Job:
     wait_task: asyncio.Task[WaitResult] | None = None
     inputs_ready: asyncio.Event | None = None
     inputs: list[str] = field(default_factory=list)
+    warm_at_submit: bool = False  # the previous submitted job used the same weights
+    est_scale: float = 1.0  # learned estimate correction applied at admission
+    extra_data: dict[str, Any] | None = None  # sent with /prompt (e.g. preview_method)
 
     @property
     def checkpoint(self) -> str:
@@ -107,6 +122,52 @@ class Job:
         return True
 
 
+@dataclass
+class _Ewma:
+    mean: float
+    dev: float
+    count: int
+
+
+class EstimateCalibrator:
+    def __init__(self, alpha: float, scale_min: float, scale_max: float, min_samples: int) -> None:
+        self.alpha = alpha
+        self.scale_min = scale_min
+        self.scale_max = scale_max
+        self.min_samples = min_samples
+        self._stats: dict[str, _Ewma] = {}
+
+    def scale(self, model_id: str) -> float:
+        st = self._stats.get(model_id)
+        if st is None or st.count < self.min_samples:
+            return 1.0
+        return min(self.scale_max, max(self.scale_min, st.mean + st.dev))
+
+    def observe(self, model_id: str, estimated_s: float, measured_s: float) -> None:
+        if estimated_s <= 0 or measured_s <= 0:
+            return
+        ratio = measured_s / estimated_s
+        st = self._stats.get(model_id)
+        if st is None:
+            self._stats[model_id] = _Ewma(mean=ratio, dev=0.0, count=1)
+            return
+        a = self.alpha
+        st.dev = (1 - a) * st.dev + a * abs(ratio - st.mean)
+        st.mean = (1 - a) * st.mean + a * ratio
+        st.count += 1
+
+    def snapshot(self) -> dict[str, dict[str, float]]:
+        return {
+            mid: {
+                "ratio_mean": round(st.mean, 3),
+                "ratio_dev": round(st.dev, 3),
+                "samples": st.count,
+                "scale": round(self.scale(mid), 3),
+            }
+            for mid, st in self._stats.items()
+        }
+
+
 class JobQueue:
     def __init__(self, settings: Settings, client: ComfyClient) -> None:
         self.settings = settings
@@ -118,6 +179,26 @@ class JobQueue:
         self.running: Job | None = None
         self._pending: deque[Job] = deque()
         self._wakeup = asyncio.Event()
+        self.calibrator = EstimateCalibrator(
+            settings.est_ewma_alpha,
+            settings.est_scale_min,
+            settings.est_scale_max,
+            settings.est_calibration_min_samples,
+        )
+
+    def scale(self, model: ModelEntry) -> float:
+        """Learned estimate correction for ``model`` (1.0 when auto-calibration is off)."""
+        return self.calibrator.scale(model.id) if self.settings.est_autocalibrate else 1.0
+
+    def _observe(self, job: Job, result: WaitResult) -> None:
+        """Feed a warm, successful job's measured GPU time into the calibration."""
+        gpu_s = result.gpu_s
+        if not job.warm_at_submit or gpu_s is None:
+            return
+        op = job.model.operation(job.params.operation)
+        extra = op.est_extra_s if op is not None else 0.0
+        estimated = compute_seconds(job.model, job.params)
+        self.calibrator.observe(job.model.id, estimated, max(0.0, gpu_s - extra))
 
     # ------------------------------------------------------------------ estimates
 
@@ -161,22 +242,27 @@ class JobQueue:
         gen_deadline: float,
         job_id: str | None = None,
         needs_inputs: bool = False,
+        budget_s: float | None = None,
+        extra_data: dict[str, Any] | None = None,
     ) -> Job:
-        """Synchronous admission: checks and the counter increment happen atomically."""
+        """Synchronous admission: checks and the counter increment happen atomically.
+        ``budget_s`` overrides the generation budget (streaming requests get a longer one)."""
         overhead = self.settings.est_job_overhead_s
-        warm = estimate_seconds(model, params, model.checkpoint, overhead)
-        if warm > self.budget_s:
+        scale = self.scale(model)
+        warm = estimate_seconds(model, params, model.checkpoint, overhead, scale)
+        budget = self.budget_s if budget_s is None else budget_s
+        if warm > budget:
             param = "n" if params.n > 1 else "steps"
             raise request_too_expensive(
                 f"This request is estimated to take {warm:.0f}s, more than the "
-                f"{self.budget_s:.0f}s generation budget. Lower n, steps or size.",
+                f"{budget:.0f}s generation budget. Lower n, steps or size.",
                 param,
             )
         wait, tail = self.estimated_wait()
         external = self.comfy_external_pending
         if self.active + external >= self.settings.queue_max_depth + 1:
             raise queue_full(wait)
-        own = estimate_seconds(model, params, tail, overhead)
+        own = estimate_seconds(model, params, tail, overhead, scale)
         # Charge the time already spent since request receipt (body read, model refresh).
         remaining = gen_deadline - time.monotonic()
         if wait + own > remaining:
@@ -197,6 +283,8 @@ class JobQueue:
             comfy_external_pending=external,
             future=loop.create_future(),
             inputs_ready=asyncio.Event() if needs_inputs else None,
+            est_scale=scale,
+            extra_data=extra_data,
         )
         self.active += 1
         self._pending.append(job)
@@ -298,7 +386,7 @@ class JobQueue:
             try:
                 # a hung /prompt must not block the FIFO past this job's own deadline
                 async with asyncio.timeout_at(loop.time() + (job.gen_deadline - time.monotonic())):
-                    prompt_id = await self.client.submit(job.graph)
+                    prompt_id = await self.client.submit(job.graph, extra_data=job.extra_data)
             except TimeoutError:
                 job.state = "timeout"
                 _set_exception(job, TimeoutError("deadline passed while submitting"))
@@ -314,6 +402,7 @@ class JobQueue:
             job.prompt_id = prompt_id
             job.submitted = True
             job.submitted_at = time.monotonic()
+            job.warm_at_submit = self.last_checkpoint == job.checkpoint
             self.last_checkpoint = job.checkpoint
             if job.cancelled:
                 # the route left while /prompt was in flight: clean up ComfyUI ourselves
@@ -340,6 +429,7 @@ class JobQueue:
                 return
             job.state = "done"
             job.finished_upstream = True
+            self._observe(job, result)
             if not job.future.done():
                 job.future.set_result(result)
         finally:
@@ -395,6 +485,10 @@ class JobQueue:
             "comfy_external_pending": self.comfy_external_pending,
             "estimated_wait_s": round(wait, 2),
             "max_depth": self.settings.queue_max_depth,
+            "estimate_calibration": {
+                "enabled": self.settings.est_autocalibrate,
+                "models": self.calibrator.snapshot(),
+            },
         }
 
 

@@ -19,6 +19,8 @@ dependencies = [
   "pillow>=10.3",
   # Multipart parser backend for the edits/variations routes.
   "python-multipart>=0.0.9",
+  # /metrics (Prometheus text exposition).
+  "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
