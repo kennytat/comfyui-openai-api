@@ -47,6 +47,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.comfy.client import ComfyClient
+from app.comfy.events import ComfyEvents
 from app.comfy.workflows import Registry, parse_size
 from app.config import Settings, load_settings
 from app.errors import install_error_handlers, request_too_large
@@ -167,6 +168,7 @@ def create_app(
             input_subfolder=settings.comfy_input_subfolder,
         )
         queue = JobQueue(settings, client)
+        app.state.events = ComfyEvents(client)
         app.state.client = client
         app.state.queue = queue
         app.state.store = ImageStore(settings.image_store_dir, settings.image_url_ttl_s, clock)
@@ -186,6 +188,8 @@ def create_app(
             ),
             asyncio.create_task(client.reconcile_startup(), name="startup-reconcile"),
         ]
+        if settings.comfy_ws:
+            tasks.append(asyncio.create_task(app.state.events.run(), name="comfy-websocket"))
         # (dir, max age, interval); uploaded user images: always swept, and soon
         input_age = settings.input_orphan_max_age_s
         sweeps = [(settings.comfy_input_dir, input_age, min(ORPHAN_SWEEP_INTERVAL_S, input_age))]

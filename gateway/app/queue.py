@@ -103,6 +103,7 @@ class Job:
     inputs: list[str] = field(default_factory=list)
     warm_at_submit: bool = False  # the previous submitted job used the same weights
     est_scale: float = 1.0  # learned estimate correction applied at admission
+    extra_data: dict[str, Any] | None = None  # sent with /prompt (e.g. preview_method)
 
     @property
     def checkpoint(self) -> str:
@@ -241,16 +242,20 @@ class JobQueue:
         gen_deadline: float,
         job_id: str | None = None,
         needs_inputs: bool = False,
+        budget_s: float | None = None,
+        extra_data: dict[str, Any] | None = None,
     ) -> Job:
-        """Synchronous admission: checks and the counter increment happen atomically."""
+        """Synchronous admission: checks and the counter increment happen atomically.
+        ``budget_s`` overrides the generation budget (streaming requests get a longer one)."""
         overhead = self.settings.est_job_overhead_s
         scale = self.scale(model)
         warm = estimate_seconds(model, params, model.checkpoint, overhead, scale)
-        if warm > self.budget_s:
+        budget = self.budget_s if budget_s is None else budget_s
+        if warm > budget:
             param = "n" if params.n > 1 else "steps"
             raise request_too_expensive(
                 f"This request is estimated to take {warm:.0f}s, more than the "
-                f"{self.budget_s:.0f}s generation budget. Lower n, steps or size.",
+                f"{budget:.0f}s generation budget. Lower n, steps or size.",
                 param,
             )
         wait, tail = self.estimated_wait()
@@ -279,6 +284,7 @@ class JobQueue:
             future=loop.create_future(),
             inputs_ready=asyncio.Event() if needs_inputs else None,
             est_scale=scale,
+            extra_data=extra_data,
         )
         self.active += 1
         self._pending.append(job)
@@ -380,7 +386,7 @@ class JobQueue:
             try:
                 # a hung /prompt must not block the FIFO past this job's own deadline
                 async with asyncio.timeout_at(loop.time() + (job.gen_deadline - time.monotonic())):
-                    prompt_id = await self.client.submit(job.graph)
+                    prompt_id = await self.client.submit(job.graph, extra_data=job.extra_data)
             except TimeoutError:
                 job.state = "timeout"
                 _set_exception(job, TimeoutError("deadline passed while submitting"))

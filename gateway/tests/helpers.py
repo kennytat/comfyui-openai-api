@@ -331,6 +331,7 @@ class FakeComfy:
 def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "api_keys_raw": KEY,
+        "comfy_ws": False,  # no WebSocket server in the fake; tests opt in
         "comfyui_url": COMFY,
         "public_base_url": PUBLIC,
         "image_store_dir": str(tmp_path / "images"),

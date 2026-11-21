@@ -174,8 +174,7 @@ async def test_jpeg_url_extension(gw):
 @pytest.mark.parametrize(
     "extra,param",
     [
-        ({"stream": True}, "stream"),
-        ({"partial_images": 2}, "partial_images"),
+        ({"stream": True, "response_format": "url"}, "response_format"),
         ({"background": "transparent"}, "background"),
     ],
 )

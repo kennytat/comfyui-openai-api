@@ -22,7 +22,7 @@ whose files ComfyUI reports. Every model supports generate, edit, masked edit an
 | `sd15` | 2.1 GB | 512x512 (default), 640x640, 768x512, 512x768, 768x576, 576x768, 896x512, 512x896 | 1024x1024 and 256x256 -> 512x512, 1536x1024 -> 768x512, 1024x1536 -> 512x768, 1792x1024 -> 896x512, 1024x1792 -> 512x896 | low 15, standard/medium/auto 25, hd/high 35 | 512x512 25 steps ~3 s (`n=4` ~12 s), edits ~3.5 s / +~7 s |
 | `flux-schnell` | 17.2 GB | same as `sdxl` | same as `sdxl` | always 4 | 1024x1024 ~13-14 s (`n=4` ~46-50 s), edits ~14 s / +~38 s (cold `n=4` ~80 s) |
 | `flux-dev` | 17.2 GB | same as `sdxl` | same as `sdxl` | low 10, standard/medium/auto 12, hd/high 18 | 1024x1024 12 steps ~31-40 s, hd ~48-53 s, `n=2` ~62 s (`n>=3` rejected up front), edits ~33 s / +~40 s (cold 12 steps ~72 s) |
-| `qwen-image` | 31.8 GB (20.4 diffusion model + 9.4 text encoder + 0.25 VAE + 1.7 Lightning LoRA) | 1328x1328 (default), 1664x928, 928x1664, 1472x1140, 1140x1472, 1584x1056, 1056x1584 | 1024x1024 -> 1328x1328, 1792x1024 -> 1664x928, 1024x1792 -> 928x1664, 1536x1024 -> 1584x1056, 1024x1536 -> 1056x1584 | low 6, all others 8 (Lightning) | 1328x1328 ~56-59 s, low ~44 s, edits ~60 s, `n>=2` rejected up front / **first request after another model: 504** (cold load ~68 s; the retry is warm) |
+| `qwen-image` | 31.8 GB (20.4 diffusion model + 9.4 text encoder + 0.25 VAE + 1.7 Lightning LoRA) | 1328x1328 (default), 1664x928, 928x1664, 1472x1140, 1140x1472, 1584x1056, 1056x1584 | 1024x1024 -> 1328x1328, 1792x1024 -> 1664x928, 1024x1792 -> 928x1664, 1536x1024 -> 1584x1056, 1024x1536 -> 1056x1584 | low 6, all others 8 (Lightning) | 1328x1328 ~56-59 s, low ~44 s, edits ~60 s, `n>=2` rejected up front / **first JSON request after another model: 504** (cold load ~68 s; the retry is warm); with `stream=true` it completes (~126 s) |
 
 - Files: `./scripts/download-models.sh sdxl sd15 flux-schnell flux-dev qwen-image qwen-image-te
   qwen-image-vae qwen-image-lightning` (`scripts/models.manifest`, sha256-verified).
@@ -65,8 +65,9 @@ whose files ComfyUI reports. Every model supports generate, edit, masked edit an
   **Cold start does not fit:** loading the diffusion model and the 7B text encoder from disk takes
   ~68 s (a direct cold run is ~125 s), so the first `qwen-image` request after another model
   returns 504 `timeout` after ~80 s. ComfyUI has loaded the model by then, so the next request runs
-  warm (verified: retry 56.9 s). Send a throwaway request (or retry once on 504) after switching to
-  `qwen-image`. Peak 11.8 GB VRAM and ~31.6 GB ComfyUI host RAM (host `MemAvailable` fell to ~8 GB on
+  warm (verified: retry 56.9 s). Use `stream=true` for the first request after a switch (streamed requests get
+  `STREAM_TIMEOUT_S`, 300 s: a cold streamed 1328x1328 request completed in 125.8 s), or retry once
+  on 504. Peak 11.8 GB VRAM and ~31.6 GB ComfyUI host RAM (host `MemAvailable` fell to ~8 GB on
   the 60 GB test machine; keep ~35 GB free for ComfyUI). Edits use VAE-encoded img2img/inpaint on
   the same model (Qwen-Image-Edit is not used).
 - **Switching models** is a full cold load each time: ComfyUI unloads the previous model itself
@@ -126,6 +127,9 @@ Only the variables below reach the gateway container (explicit `environment:` in
 | `RATE_LIMIT_RPM` | `0` | Requests per minute per API key on `/v1/images/*` (token bucket; `0` = off). Over the limit: 429 `rate_limit_exceeded` with `Retry-After` (the OpenAI SDKs retry it) |
 | `RATE_LIMIT_BURST` | `0` | Bucket size; `0` = `max(1, RATE_LIMIT_RPM)` |
 | `ENABLE_METRICS` | `true` | Serve Prometheus metrics at `GET /metrics` (requires a Bearer API key) |
+| `COMFY_WS` | `true` | Keep a WebSocket to ComfyUI (completion wake-ups, progress, previews for `partial_images`) |
+| `STREAM_TIMEOUT_S` | `300` | Deadline of `stream=true` requests (`REQUEST_TIMEOUT_S`..3600); admission uses `STREAM_TIMEOUT_S - POSTPROCESS_RESERVE_S` |
+| `STREAM_KEEPALIVE_S` | `15` | Interval of `: keep-alive` SSE comments on idle streams |
 | `POLL_INTERVAL_S` | `0.5` | ComfyUI `/history` poll interval |
 | `COMFY_QUEUE_POLL_S` | `2` | ComfyUI `/queue` poll interval for external load |
 | `IMAGE_URL_TTL_S` | `3600` | Lifetime of hosted image URLs |
@@ -237,8 +241,10 @@ r = client.images.create_variation(model="sdxl", image=open("fox.png", "rb"), n=
 - **Fields:** edits take `prompt` (required), `model`, `n`, `size`, `response_format`, `quality`,
   `output_format`, `output_compression`; variations take `model`, `n`, `size`, `response_format`.
   Extensions: `seed`, `strength` (denoise 0.05..1.0; defaults: edit 0.7, masked edit 1.0 (flux-schnell and flux-dev 0.8),
-  variation 0.55), plus `negative_prompt`, `steps`, `cfg_scale` as for generations. `stream`,
-  `partial_images > 0` and `background=transparent` are 400 like generations.
+  variation 0.55), plus `negative_prompt`, `steps`, `cfg_scale` as for generations. Edits
+  also take `stream`/`partial_images` (events `image_edit.partial_image` /
+  `image_edit.completed`); variations reject `stream` and `partial_images > 0` (400, like
+  OpenAI), and `background=transparent` is 400 everywhere.
 - Uploads go to ComfyUI as `input/openai-api/<job_id>_image.png` / `<job_id>_mask.png` and are
   deleted after every outcome (success, error, 504, client disconnect), and once more ~2 s later
   to catch an upload that landed after a cancelled request; the input orphan sweeper
@@ -247,6 +253,35 @@ r = client.images.create_variation(model="sdxl", image=open("fox.png", "rb"), n=
 - Edits/variations cost about the same as a generation of the same size and steps (ComfyUI runs all
   `steps` regardless of `strength`): SDXL 1024x1024, 25 steps ~17-22 s, `n=2` ~33-38 s on the 3060.
 
+## Streaming (`stream=true`, `partial_images`)
+
+Generations and edits accept `stream=true` (OpenAI SDK: `client.images.generate(..., stream=True,
+partial_images=2)`). The response is Server-Sent Events:
+
+- up to `partial_images` (0-3) `image_generation.partial_image` / `image_edit.partial_image` events
+  with `partial_image_index`, taken from ComfyUI's live latent previews (requested per prompt with
+  `preview_method: auto`, i.e. TAESD where available) and spread evenly over the sampling steps.
+  **Previews are ComfyUI's preview resolution (at most 512 px on the long side), not the final
+  size**, and only the first image of a batch is previewed;
+- one `image_generation.completed` / `image_edit.completed` event per image (`b64_json`, `size`,
+  `quality`, `output_format`, `background: opaque`, zero `usage`);
+- on failure after the stream started, one `event: error` with the usual OpenAI error body (the
+  SDK raises `APIError`); errors before the first byte (validation, 400/429 admission, 404) are
+  normal JSON responses.
+
+A `: keep-alive` SSE comment is sent every `STREAM_KEEPALIVE_S` (15 s), so a streamed request is
+never idle and may run up to `STREAM_TIMEOUT_S` (default 300 s) instead of `REQUEST_TIMEOUT_S`:
+admission uses the longer budget, so jobs that are too expensive for a JSON response (`n=4` at high
+step counts, the `qwen-image` cold load) are accepted when streamed. This is the gateway's strategy
+for jobs longer than Cloudflare's 100 s origin limit (Cloudflare closes only connections that send
+nothing for 100 s; verify on your own tunnel). `response_format=url` cannot be streamed (400).
+Measured on the RTX 3060: `sdxl` 15 steps partials at 5.1 s and 9.6 s, final 15.8 s; `flux-dev`
+3 partials, final 72.6 s (cold); `qwen-image` cold 1328x1328 final at 125.8 s.
+
+The gateway also keeps a WebSocket to ComfyUI (`COMFY_WS`, default on) for these previews and to
+wake the `/history` poll the moment a prompt finishes; polling remains the fallback when the socket
+is down.
+
 ## Errors
 
 All errors use the OpenAI envelope `{"error": {"message", "type", "param", "code"}}`.
@@ -254,7 +289,7 @@ All errors use the OpenAI envelope `{"error": {"message", "type", "param", "code
 | Condition | HTTP | code | Retry headers |
 |---|---|---|---|
 | Invalid request / schema | 400 | `invalid_value` (field-specific, `param` set) | |
-| `stream`, `partial_images>0`, `background=transparent`, `url` disabled | 400 | `unsupported_value` | |
+| `background=transparent`, `url` disabled, `stream` with `response_format=url`, `stream`/`partial_images` on variations | 400 | `unsupported_value` | |
 | Single job too expensive for the budget | 400 | `request_too_expensive` | |
 | Missing/invalid key | 401 | `invalid_api_key` | `WWW-Authenticate: Bearer` |
 | Unknown/unavailable model | 404 | `model_not_found` | |
@@ -303,8 +338,8 @@ scrape config: `authorization: {credentials: <an API key>}`.
   `queue_full` otherwise); JPEGs are DCT-downscaled while decoding. The gateway container has
   `mem_limit: 2g`. A slow upload to ComfyUI holds the GPU queue for at most `UPLOAD_WAIT_S`
   (that request gets 503).
-- Not supported yet: streaming / `partial_images`, transparent backgrounds, multi-image edits,
-  image URLs/file ids instead of uploads.
+- Not supported yet: transparent backgrounds, multi-image edits, image URLs/file ids instead of
+  uploads.
 
 ## Networking
 

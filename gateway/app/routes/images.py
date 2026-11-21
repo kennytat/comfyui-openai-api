@@ -36,6 +36,7 @@ import base64
 import contextlib
 import json
 import logging
+import math
 import threading
 import time
 import uuid
@@ -44,7 +45,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
 from app import errors
@@ -57,6 +58,7 @@ from app.comfy.client import (
     UpstreamUnavailable,
     WaitResult,
 )
+from app.comfy.events import ComfyEvents
 from app.comfy.workflows import GenerationParams, ModelEntry, build_prompt, resolve_params
 from app.postprocess import reencode
 from app.queue import Job
@@ -189,6 +191,12 @@ def _ms(seconds: float | None) -> int | None:
 
 
 def _response_format(body: ImageOptions, settings: Any) -> str:
+    if body.stream:  # stream events always carry b64_json
+        if body.response_format == "url":
+            raise errors.unsupported_value(
+                "response_format 'url' cannot be streamed; use b64_json.", "response_format"
+            )
+        return "b64_json"
     response_format = body.response_format or settings.default_response_format
     if response_format == "url" and not settings.enable_url_format:
         raise errors.unsupported_value(
@@ -400,13 +408,23 @@ async def _run_job(
     -> fetch -> encode -> response; shielded cleanup outside the timeout scope."""
     state = request.app.state
     settings = state.settings
-    total_deadline = t0 + settings.request_timeout_s
+    stream = bool(body.stream)
+    partial_images = (body.partial_images or 0) if stream else 0
+    timeout_s = settings.stream_timeout_s if stream else settings.request_timeout_s
+    total_deadline = t0 + timeout_s
     gen_deadline = total_deadline - settings.postprocess_reserve_s
     output_format = body.output_format or "png"
     params = resolve_params(entry, params)
     graph = build_prompt(entry, params)
     job = state.queue.admit(  # may raise 400/429
-        entry, params, graph, gen_deadline, job_id, needs_inputs=bool(uploads)
+        entry,
+        params,
+        graph,
+        gen_deadline,
+        job_id,
+        needs_inputs=bool(uploads),
+        budget_s=settings.stream_budget_s if stream else None,
+        extra_data={"preview_method": "auto"} if partial_images else None,
     )
 
     record: dict[str, Any] = {
@@ -425,6 +443,15 @@ async def _run_job(
     }
     if params.denoise is not None:
         record["denoise"] = params.denoise
+    if stream:
+        record["stream"] = True
+        return StreamingResponse(
+            _stream_job(
+                request, t0, job, body, params, record, total_deadline, uploads, partial_images
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
     history: dict[str, Any] | None = None
     guard = EncodeGuard(state.store, total_deadline)
     status, outcome = 500, "internal_error"
@@ -483,6 +510,158 @@ async def _run_job(
             _cleanup(request, job, history, t0, record, None if status == 200 else guard)
         )
         _CLEANUP_TASKS.add(cleanup)  # strong ref: survives a cancelled route task
+        cleanup.add_done_callback(_CLEANUP_TASKS.discard)
+        await asyncio.shield(cleanup)
+
+
+_EVENT_QUALITY = {"standard": "medium", "hd": "high"}
+_ZERO_USAGE = {
+    "input_tokens": 0,
+    "input_tokens_details": {"image_tokens": 0, "text_tokens": 0},
+    "output_tokens": 0,
+    "total_tokens": 0,
+}
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+def _partial_due(step: int, max_steps: int, index: int, count: int) -> bool:
+    """Spread ``count`` partial images evenly over the sampling steps (never the last)."""
+    if max_steps <= 0:
+        return True
+    return step >= math.ceil(max_steps * (index + 1) / (count + 1))
+
+
+async def _stream_job(
+    request: Request,
+    t0: float,
+    job: Job,
+    body: ImageOptions,
+    params: GenerationParams,
+    record: dict[str, Any],
+    total_deadline: float,
+    uploads: list[_Upload],
+    partial_images: int,
+) -> Any:
+    """SSE body of a ``stream=true`` request: keep-alive comments every
+    ``STREAM_KEEPALIVE_S`` (so a tunnel never sees an idle connection), up to
+    ``partial_images`` ComfyUI previews as ``*.partial_image`` events, one ``*.completed``
+    event per image, or one ``error`` event (OpenAI envelope). Cleanup as for JSON jobs."""
+    state = request.app.state
+    settings = state.settings
+    events: ComfyEvents = state.events
+    prefix = "image_generation" if params.operation == "generate" else "image_edit"
+    output_format = body.output_format or "png"
+    meta = {
+        "size": f"{params.width}x{params.height}",
+        "quality": _EVENT_QUALITY.get(body.quality or "auto", body.quality or "auto"),
+        "background": "opaque",
+        "output_format": output_format,
+    }
+    history: dict[str, Any] | None = None
+    guard = EncodeGuard(state.store, total_deadline)
+    status, outcome = 500, "internal_error"
+    sent = 0
+    loop = asyncio.get_running_loop()
+    try:
+        yield ": stream started\n\n"
+        last_write = time.monotonic()
+        try:
+            async with asyncio.timeout_at(loop.time() + (total_deadline - time.monotonic())):
+                if uploads:
+                    up0 = time.monotonic()
+                    await _upload_inputs(state.client, job, uploads)
+                    record["upload_ms"] = _ms(time.monotonic() - up0)
+                    assert job.inputs_ready is not None
+                    job.inputs_ready.set()
+                last_seq = 0
+                while not job.future.done():
+                    st = events.state(job.prompt_id) if job.prompt_id else None
+                    preview = st.preview if st is not None else None
+                    if (
+                        sent < partial_images
+                        and preview is not None
+                        and preview.seq != last_seq
+                        and _partial_due(preview.step, preview.max_steps, sent, partial_images)
+                    ):
+                        last_seq = preview.seq
+                        data = await asyncio.to_thread(
+                            reencode, preview.data, output_format, body.output_compression
+                        )
+                        yield _sse(
+                            f"{prefix}.partial_image",
+                            {
+                                "type": f"{prefix}.partial_image",
+                                "b64_json": base64.b64encode(data).decode("ascii"),
+                                "created_at": int(state.clock()),
+                                "partial_image_index": sent,
+                                **meta,
+                            },
+                        )
+                        sent += 1
+                        last_write = time.monotonic()
+                        continue
+                    waiter = asyncio.ensure_future(events.wait_changed(settings.stream_keepalive_s))
+                    try:
+                        await asyncio.wait(
+                            {job.future, waiter}, return_when=asyncio.FIRST_COMPLETED
+                        )
+                    finally:
+                        waiter.cancel()
+                    if time.monotonic() - last_write >= settings.stream_keepalive_s:
+                        yield ": keep-alive\n\n"
+                        last_write = time.monotonic()
+                result = job.future.result()
+                history = result.history
+                record["comfy_wait_ms"] = _ms(result.comfy_wait_s)
+                record["gpu_ms"] = _ms(result.gpu_s)
+                blobs = await state.client.fetch_outputs(history, job.output_node)
+                pp0 = time.monotonic()
+                items = await asyncio.to_thread(
+                    _encode_all,
+                    blobs,
+                    output_format,
+                    body.output_compression,
+                    True,
+                    guard,
+                    settings.public_base_url,
+                )
+                record["postprocess_ms"] = _ms(time.monotonic() - pp0)
+        except (TimeoutError, EncodeAborted) as exc:
+            raise errors.timeout() from exc
+        except ComfyError as exc:
+            raise map_comfy_error(exc) from exc
+        except asyncio.CancelledError:
+            raise
+        status, outcome = 200, "ok"
+        for item in items:
+            yield _sse(
+                f"{prefix}.completed",
+                {
+                    "type": f"{prefix}.completed",
+                    "b64_json": item["b64_json"],
+                    "created_at": int(state.clock()),
+                    "usage": _ZERO_USAGE,
+                    **meta,
+                },
+            )
+    except errors.OpenAIError as exc:
+        status, outcome = exc.status, exc.code or "error"
+        metrics = getattr(state, "metrics", None)
+        if metrics is not None:
+            metrics.error(exc.status, exc.code)
+        yield _sse("error", exc.body())
+    except (asyncio.CancelledError, GeneratorExit):
+        status, outcome = CLIENT_GONE_STATUS, "client_disconnected"
+        raise
+    finally:
+        record.update(outcome=outcome, http_status=status, partial_images_sent=sent)
+        cleanup = asyncio.ensure_future(
+            _cleanup(request, job, history, t0, record, None if status == 200 else guard)
+        )
+        _CLEANUP_TASKS.add(cleanup)
         cleanup.add_done_callback(_CLEANUP_TASKS.discard)
         await asyncio.shield(cleanup)
 
@@ -556,6 +735,9 @@ async def _cleanup(
         queue.release(job)
         if job.prompt_id is not None:
             client.forget(job.prompt_id)
+            events = getattr(state, "events", None)
+            if events is not None:
+                events.forget(job.prompt_id)
         record["prompt_id"] = job.prompt_id
         if job.submitted_at is not None:
             record["queue_wait_ms"] = _ms(job.submitted_at - t0)

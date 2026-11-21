@@ -63,8 +63,7 @@ async def test_schema_violations(gw, body, param, code):
 @pytest.mark.parametrize(
     "body,param",
     [
-        ({"stream": True}, "stream"),
-        ({"partial_images": 1}, "partial_images"),
+        ({"stream": True, "response_format": "url"}, "response_format"),
         ({"background": "transparent"}, "background"),
     ],
 )
